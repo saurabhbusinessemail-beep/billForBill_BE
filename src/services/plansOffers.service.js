@@ -45,12 +45,16 @@ function validate(kind, input, partial = false) {
     take('price', value => validMoney(value, 'Price')); take('billCount', value => count(value, 'Bill count'));
   } else {
     take('name', value => text(value, 'offer name', 120)); take('code', value => text(value, 'code', 40));
-    take('discountType', value => { if (!['percent', 'flat'].includes(value)) throw fail(400, 'INVALID_DISCOUNT_TYPE', 'Choose a valid discount type.'); return value; });
-    take('amount', value => validMoney(value, 'Discount amount'));
+    if (Object.hasOwn(input, 'discountType')) out.discountType = input.discountType === '' && !partial ? 'percent' : (() => { if (!['percent', 'flat'].includes(input.discountType)) throw fail(400, 'INVALID_DISCOUNT_TYPE', 'Choose a valid discount type.'); return input.discountType; })();
+    else if (!partial) out.discountType = 'percent';
+    if (Object.hasOwn(input, 'amount')) out.amount = input.amount === null || input.amount === '' ? null : validMoney(input.amount, 'Discount amount');
+    else if (!partial) out.amount = null;
     for (const [key, label] of [['planIds', 'plans'], ['userIds', 'users'], ['businessIds', 'businesses']]) if (Object.hasOwn(input, key)) out[key] = idList(input[key], label); else if (!partial) out[key] = [];
     if (Object.hasOwn(input, 'businessTypeIds')) out.businessTypeIds = idList(input.businessTypeIds, 'business types');
     else if (!partial) out.businessTypeIds = [];
-    take('validTill', dateOnly);
+    if (Object.hasOwn(input, 'validTill')) out.validTill = input.validTill === null || input.validTill === '' ? null : dateOnly(input.validTill);
+    else if (!partial) out.validTill = null;
+    if (!partial && !out.businessTypeIds.length) throw fail(400, 'BUSINESS_TYPE_REQUIRED', 'Choose at least one business type.');
   }
   if (Object.hasOwn(input, 'isActive')) {
     if (typeof input.isActive !== 'boolean') throw fail(400, 'INVALID_ACTIVE_STATUS', 'Active status must be true or false.');
@@ -113,7 +117,7 @@ async function list(kind, query = {}) {
 }
 async function get(kind, id) { assertDatabaseConnected(); if (!mongoose.isValidObjectId(id)) throw fail(404, 'RECORD_NOT_FOUND', 'Record not found.'); const row = await models[kind].findById(id).lean(); if (!row) throw fail(404, 'RECORD_NOT_FOUND', 'Record not found.'); return serialize(row); }
 async function create(kind, input) { assertDatabaseConnected(); const values = validate(kind, input); if (kind === 'offers') await validateReferences(values); return serialize(await models[kind].create(values)); }
-async function update(kind, id, input) { assertDatabaseConnected(); if (!mongoose.isValidObjectId(id)) throw fail(404, 'RECORD_NOT_FOUND', 'Record not found.'); const values = validate(kind, input, true); if (kind === 'offers') await validateReferences(values); const row = await models[kind].findByIdAndUpdate(id, { $set: values }, { new: true, runValidators: true }); if (!row) throw fail(404, 'RECORD_NOT_FOUND', 'Record not found.'); return serialize(row); }
+async function update(kind, id, input) { assertDatabaseConnected(); if (!mongoose.isValidObjectId(id)) throw fail(404, 'RECORD_NOT_FOUND', 'Record not found.'); const values = validate(kind, input, true); if (kind === 'offers') { const existing = await PlanOffer.findById(id).select('businessTypeIds'); if (!existing) throw fail(404, 'RECORD_NOT_FOUND', 'Record not found.'); const businessTypeIds = values.businessTypeIds || existing.businessTypeIds.map(String); if (!businessTypeIds.length) throw fail(400, 'BUSINESS_TYPE_REQUIRED', 'Choose at least one business type.'); await validateReferences(values); } const row = await models[kind].findByIdAndUpdate(id, { $set: values }, { new: true, runValidators: true }); if (!row) throw fail(404, 'RECORD_NOT_FOUND', 'Record not found.'); return serialize(row); }
 async function setActive(kind, id, isActive) { if (typeof isActive !== 'boolean') throw fail(400, 'INVALID_ACTIVE_STATUS', 'Active status must be true or false.'); return update(kind, id, { isActive }); }
 async function planOffers(planId) { assertDatabaseConnected(); if (!mongoose.isValidObjectId(planId)) throw fail(404, 'RECORD_NOT_FOUND', 'Plan not found.'); const [plan, offers] = await Promise.all([Plan.exists({ _id: planId }), PlanOffer.find({ planIds: planId }).sort({ createdAt: -1, _id: -1 }).lean()]); if (!plan) throw fail(404, 'RECORD_NOT_FOUND', 'Plan not found.'); return decorateOffers(offers); }
 async function lookups(kind, query = {}) {
