@@ -54,6 +54,8 @@ const BUSINESS_PERMISSIONS = [
   ['business.paymentMethods.manage', 'business', 'permission.paymentMethods.label', 'permission.paymentMethods.description'],
   ['business.transportConfig.manage', 'business', 'permission.transportConfig.label', 'permission.transportConfig.description'],
   ['business.transport.manage', 'business', 'permission.transport.label', 'permission.transport.description'],
+  ['business.plans.view', 'plans', 'permission.plansView.label', 'permission.plansView.description'],
+  ['business.plans.purchase', 'plans', 'permission.plansPurchase.label', 'permission.plansPurchase.description'],
   ['business.deliveries.date.manage', 'bills', 'permission.deliveryDate.label', 'permission.deliveryDate.description'],
 ].map(([key, category, labelKey, descriptionKey]) => ({ key, category, labelKey, descriptionKey }));
 module.exports = { BUSINESS_PERMISSIONS, PERMISSION_KEYS: new Set(BUSINESS_PERMISSIONS.map((x) => x.key)) };

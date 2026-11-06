@@ -7,6 +7,7 @@ const billSchema = new Schema({
   entryMode: { type: String, enum: ['detailed', 'image'], required: true },
   status: { type: String, enum: ['draft', 'issued', 'cancelled'], default: 'draft', index: true },
   deliveryStatus: { type: String, enum: ['draft', 'in_transit', 'delivered', 'received', 'cancelled'], default: 'draft', index: true },
+  planId: { type: String, default: null, index: true },
   billNumber: { type: String, default: null, trim: true },
   sequenceNumber: { type: Number, default: null },
   billDate: { type: String, required: true },
@@ -45,8 +46,12 @@ const billSchema = new Schema({
 }, { timestamps: true, minimize: false });
 billSchema.index({ businessId: 1, billNumber: 1 }, { unique: true, partialFilterExpression: { billNumber: { $type: 'string' } } });
 billSchema.index({ businessId: 1, billType: 1, status: 1, billDate: -1 });
+billSchema.index({ businessId: 1, planId: 1, status: 1, issuedAt: 1 });
 billSchema.index({ businessId: 1, orderId: 1 }, { unique: true, partialFilterExpression: { orderId: { $type: 'objectId' }, status: { $in: ['draft', 'issued'] } } });
 billSchema.index({ businessId: 1, idempotencyKey: 1 }, { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } });
 billSchema.index({ businessId: 1, partyUserId: 1, dueDate: 1 });
 billSchema.index({ partyUserId: 1, billType: 1, status: 1, billDate: -1, _id: -1 });
+billSchema.pre('validate', function validateIssuedPlanId() {
+  if (this.status === 'issued' && !this.planId && (this.isNew || this.isModified('status'))) this.invalidate('planId', 'Issued bills must reference a plan or extra-credit entitlement.', 'PLAN_ID_REQUIRED');
+});
 module.exports = mongoose.models.BusinessBill || mongoose.model('BusinessBill', billSchema);

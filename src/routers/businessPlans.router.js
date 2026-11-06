@@ -1,0 +1,13 @@
+'use strict';
+const express = require('express');
+const { requireSession } = require('../middleware/requireSession');
+const controller = require('../controllers/businessPlans.controller');
+const router = express.Router();
+router.use(requireSession, (_req, res, next) => { res.setHeader('Cache-Control', 'private, no-store'); next(); });
+router.get('/:businessId/plans', controller.dashboard);
+router.get('/:businessId/plans/available', controller.plans);
+router.get('/:businessId/plans/extra-credits/available', controller.credits);
+router.post('/:businessId/plans/offers/validate', controller.validateOffer);
+router.post('/:businessId/plans/purchases', controller.purchasePlan);
+router.post('/:businessId/plans/extra-credit-purchases', controller.purchaseExtraCredit);
+module.exports = router;

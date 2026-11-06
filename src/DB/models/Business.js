@@ -7,6 +7,7 @@ const businessSchema = new mongoose.Schema({
   ownerUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   creationRequestKey: { type: String, default: null, maxlength: 100 },
   businessTypeId: { type: Schema.Types.ObjectId, ref: 'BusinessType', default: null },
+  timeZone: { type: String, trim: true, maxlength: 80, default: process.env.BUSINESS_DEFAULT_TIME_ZONE || 'Asia/Kolkata' },
   catalogCopyState: { type: String, enum: ['pending', 'complete'], default: 'complete', index: true },
   catalogProvenance: { type: Schema.Types.Mixed, default: null },
   businessTaxComponentIds: [{ type: Schema.Types.ObjectId, ref: 'BusinessCatalogTax' }],

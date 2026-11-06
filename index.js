@@ -26,6 +26,7 @@ const personalRouter = require('./src/routers/personal.router');
 const adminSetupRouter = require('./src/routers/adminSetup.router');
 const productImagesRouter = require('./src/routers/productImages.router');
 const plansOffersRouter = require('./src/routers/plansOffers.router');
+const businessPlansRouter = require('./src/routers/businessPlans.router');
 
 const PORT = Number(process.env.PORT || 3000);
 const configuredFrontendOrigins = (process.env.FRONTEND_ORIGINS || process.env.FRONTEND_ORIGIN || 'https://localhost:4200')
@@ -116,6 +117,7 @@ app.use('/businesses', businessOrdersRouter);
 app.use('/businesses', businessInventoryRouter);
 app.use('/businesses', businessLeadsRouter);
 app.use('/businesses', businessBillsPaymentsRouter);
+app.use('/businesses', businessPlansRouter);
 app.use('/businesses', businessDeliveriesRouter);
 app.use('/personal', personalRouter);
 app.use('/admin-setup/plans-offers', plansOffersRouter);

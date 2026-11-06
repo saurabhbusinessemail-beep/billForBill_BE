@@ -213,7 +213,7 @@ function verifyDetailedBillSnapshot(bill, order) {
 }
 async function issueUnlocked(bid, uid, billId) {
   await auth(bid, uid, 'business.bills.issue'); if (!idOk(billId)) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.');
-  const bill = await Bill.findOne({ _id: billId, businessId: bid, deletedAt: null }); if (!bill) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.'); if (bill.status === 'issued') { if (bill.deliveryStatus === 'delivered' || bill.deliveryStatus === 'received') await postBillInventory(bill.toObject(), uid, 'delivered_at_issue'); if(bill.deliveryStatus==='in_transit') await require('./businessDeliveries.service').createDraftFromBill(bill,uid); return billView(bill.toObject()); } if (bill.status !== 'draft') throw fail(409, 'INVALID_BILL_STATE', 'Only a draft bill can be issued.');
+  const bill = await Bill.findOne({ _id: billId, businessId: bid, deletedAt: null }); if (!bill) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.'); if (bill.status === 'issued') { if (!bill.planId) { bill.planId = require('./businessPlans.service').DEFAULT_FREE_PLAN; await bill.save(); } if (bill.deliveryStatus === 'delivered' || bill.deliveryStatus === 'received') await postBillInventory(bill.toObject(), uid, 'delivered_at_issue'); if(bill.deliveryStatus==='in_transit') await require('./businessDeliveries.service').createDraftFromBill(bill,uid); return billView(bill.toObject()); } if (bill.status !== 'draft') throw fail(409, 'INVALID_BILL_STATE', 'Only a draft bill can be issued.');
   if (bill.entryMode === 'detailed') {
     const order = bill.orderId ? await Order.findOne({ _id: bill.orderId, businessId: bid, deletedAt: null }).lean() : null;
     const orderVerified = verifyDetailedOrderSnapshot(order);
@@ -251,9 +251,19 @@ async function issueUnlocked(bid, uid, billId) {
     }
   }
   if (bill.entryMode === 'image' && !bill.imageIds.length) throw fail(400, 'BILL_FILE_REQUIRED', 'Upload at least one bill image or PDF before issuing.');
+  bill.planId = await require('./businessPlans.service').issueEntitlement(bid, uid);
   const sequence = await nextNumber(BillCounter, bid, bill.billType); const numberConfig = await NumberConfig.findOne({ businessId: bid }).lean(); const prefix = bill.billType === 'sale' ? (numberConfig?.billSalesPrefix || 'SB') : (numberConfig?.billPurchasePrefix || 'PB'); const at = new Date();
   bill.billNumber = `${prefix}-${sequence}`; bill.sequenceNumber = sequence; bill.status = 'issued'; bill.deliveryStatus = bill.deliveredAtIssue ? (bill.billType === 'sale' ? 'delivered' : 'received') : 'in_transit'; bill.issuedAt = at; bill.issuedByUserId = uid; bill.version += 1; bill.updatedByUserId = uid; bill.lifecycleEvents.push({ action: 'issued', actorUserId: uid, at }); await bill.save();
-  await syncOrderBillStatus(bill, uid); if (bill.deliveryStatus === 'delivered' || bill.deliveryStatus === 'received') await postBillInventory(bill.toObject(), uid, 'delivered_at_issue'); if (bill.deliveryStatus === 'in_transit') await require('./businessDeliveries.service').createDraftFromBill(bill,uid); return billView(bill.toObject());
+  if (bill.deliveryStatus === 'delivered' || bill.deliveryStatus === 'received') {
+    try { await postBillInventory(bill.toObject(), uid, 'delivered_at_issue'); }
+    catch (error) {
+      bill.status = 'draft'; bill.deliveryStatus = 'draft'; bill.planId = null; bill.billNumber = null; bill.sequenceNumber = null; bill.issuedAt = null; bill.issuedByUserId = null; bill.version += 1; bill.updatedByUserId = uid;
+      if (bill.lifecycleEvents.at(-1)?.action === 'issued') bill.lifecycleEvents.pop();
+      await bill.save();
+      throw error;
+    }
+  }
+  await syncOrderBillStatus(bill, uid); if (bill.deliveryStatus === 'in_transit') await require('./businessDeliveries.service').createDraftFromBill(bill,uid); return billView(bill.toObject());
 }
 async function issue(bid, uid, billId) { return withFinancialLock(bid, () => issueUnlocked(bid, uid, billId)); }
 async function syncOrderBillStatus(bill, uid) {
@@ -540,4 +550,4 @@ async function paymentSummary(bid, uid) {
   return { received: moneyText(received), paid: moneyText(paid), incomingAdvance: moneyText(incomingAdvance), receivable: moneyText(receivable), payable: moneyText(payable), paymentCount: rows.length, currencyCode: bills[0]?.currencyCode || rows[0]?.currencyCode || '', authorization: { isOwner: ctx.owner, permissionKeys: [...ctx.keys] } };
 }
 async function getBill(bid, uid, billId) { await auth(bid, uid, 'business.bills.view'); if (!idOk(billId)) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.'); const bill = await Bill.findOne({ _id: billId, businessId: bid, deletedAt: null }).lean(); if (!bill) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.'); const paid = await balances(bid, [bill]); const [allocations, images, order] = await Promise.all([Allocation.find({ businessId: bid, billId }).populate('paymentId').sort({ createdAt: 1 }).lean(), BillImage.find({ businessId: bid, billId, deletedAt: null }).select('-fileId').sort({ createdAt: 1 }).lean(), bill.orderId ? Order.findOne({ _id: bill.orderId, businessId: bid }).select('orderNumber').lean() : null]); return { ...billView(bill, paid.get(String(bill._id)) || 0n), orderNumber: order?.orderNumber || '', files: images.map(x => ({ id: String(x._id), filename: x.filename, contentType: x.contentType, size: x.size, url: `/businesses/${bid}/bills/${billId}/files/${x._id}` })), allocations: allocations.map(a => ({ id: String(a._id), amount: String(a.amount), reversedAt: a.reversedAt, payment: a.paymentId ? { id: String(a.paymentId._id), paymentNumber: a.paymentId.paymentNumber, date: a.paymentId.paymentDate, method: a.paymentId.method } : null })) }; }
-module.exports = { listBills, summary, createDraft, updateDraft, issue, changeDelivery, recordDeliveryStarted, cancelBill, cancelOrder, deleteDraft, uploadFile, billFileStream, pendingBills, createPayment, listPayments, listPartyBalances, getPaymentRecord, reversePayment, paymentSummary, getBill, paymentDetails, lookupBillParty, savePaymentMethodConfig, documentNumberConfig, saveDocumentNumberConfig, transportConfig, saveTransportConfig };
+module.exports = { listBills, summary, createDraft, updateDraft, issue, changeDelivery, recordDeliveryStarted, cancelBill, cancelOrder, deleteDraft, uploadFile, billFileStream, pendingBills, createPayment, listPayments, listPartyBalances, getPaymentRecord, reversePayment, paymentSummary, getBill, paymentDetails, lookupBillParty, savePaymentMethodConfig, documentNumberConfig, saveDocumentNumberConfig, transportConfig, saveTransportConfig, withFinancialLock };
