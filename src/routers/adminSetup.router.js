@@ -1,0 +1,15 @@
+'use strict';
+const express = require('express');
+const { requireSession } = require('../middleware/requireSession');
+const { requireAdmin } = require('../middleware/requireAdmin');
+const businessTypes = require('./adminSetup/businessTypes.router');
+const products = require('./adminSetup/products.router');
+const categories = require('./adminSetup/categories.router');
+const attributes = require('./adminSetup/attributes.router');
+const units = require('./adminSetup/units.router');
+const taxes = require('./adminSetup/taxes.router');
+const router = express.Router();
+router.use(requireSession, requireAdmin);
+router.use('/business-types', businessTypes); router.use('/products', products); router.use('/categories', categories);
+router.use('/attributes', attributes); router.use('/units', units); router.use('/taxes', taxes);
+module.exports = router;

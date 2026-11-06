@@ -1,0 +1,4 @@
+'use strict';
+const mongoose = require('mongoose');
+const schema = new mongoose.Schema({ businessId: { type: mongoose.Schema.Types.ObjectId, ref: 'Business', required: true, unique: true }, orderSalesPrefix: { type: String, default: 'SO', trim: true, maxlength: 12 }, orderPurchasePrefix: { type: String, default: 'PO', trim: true, maxlength: 12 }, billSalesPrefix: { type: String, default: 'SB', trim: true, maxlength: 12 }, billPurchasePrefix: { type: String, default: 'PB', trim: true, maxlength: 12 }, paymentPrefix: { type: String, default: 'PAY', trim: true, maxlength: 12 }, deliveryPrefix: { type: String, default: 'DLV', trim: true, maxlength: 12 }, updatedByUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null } }, { timestamps: true });
+module.exports = mongoose.models.BusinessDocumentNumberConfig || mongoose.model('BusinessDocumentNumberConfig', schema);

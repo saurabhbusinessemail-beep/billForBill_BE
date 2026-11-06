@@ -1,0 +1,4 @@
+'use strict';
+const mongoose = require('mongoose');
+const schema = new mongoose.Schema({ productId: { type: mongoose.Schema.Types.ObjectId, ref: 'CatalogProduct', required: true, unique: true }, originalName: { type: String, required: true, maxlength: 255 }, contentType: { type: String, required: true, enum: ['image/jpeg', 'image/png', 'image/webp'] }, sizeBytes: { type: Number, required: true, min: 1, max: 512000 }, data: { type: Buffer, required: true, select: false }, seedSourceUrl: { type: String, default: '', maxlength: 2048 }, seedFallback: { type: Boolean, default: false } }, { timestamps: true });
+module.exports = mongoose.models.ProductImage || mongoose.model('ProductImage', schema);

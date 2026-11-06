@@ -1,0 +1,18 @@
+'use strict';
+const express = require('express');
+const { requireSession } = require('../middleware/requireSession');
+const controller = require('../controllers/businessDeliveries.controller');
+const router = express.Router();
+router.use(requireSession, (_req, res, next) => { res.setHeader('Cache-Control', 'private, no-store'); next(); });
+router.get('/:businessId/deliveries/orders', controller.orders);
+router.get('/:businessId/deliveries/parties', controller.parties);
+router.get('/:businessId/deliveries/parties/:partyId/addresses', controller.addresses);
+router.post('/:businessId/deliveries/parties/:partyId/addresses', controller.addAddress);
+router.get('/:businessId/deliveries/users', controller.searchUsers);
+router.post('/:businessId/deliveries/users', controller.createUser);
+router.get('/:businessId/deliveries', controller.list);
+router.post('/:businessId/deliveries', controller.create);
+router.get('/:businessId/deliveries/:deliveryId', controller.get);
+router.put('/:businessId/deliveries/:deliveryId', controller.update);
+router.post('/:businessId/deliveries/:deliveryId/actions', controller.action);
+module.exports = router;

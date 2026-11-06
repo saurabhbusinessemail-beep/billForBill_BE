@@ -1,0 +1,18 @@
+'use strict';
+const express = require('express');
+const { requireSession } = require('../middleware/requireSession');
+const controller = require('../controllers/businessPricing.controller');
+const router = express.Router();
+router.use(requireSession, (_req, res, next) => { res.setHeader('Cache-Control', 'private, no-store'); next(); });
+const workbookUpload = express.raw({ type: ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/octet-stream'], limit: '5mb' });
+router.get('/:businessId/pricing', controller.list);
+router.get('/:businessId/pricing/customers/lookup', controller.lookupCustomer);
+router.put('/:businessId/pricing/products/:productId', controller.save);
+router.post('/:businessId/pricing/bulk', controller.bulk);
+router.post('/:businessId/pricing/workbooks/:type/export', controller.exportWorkbook);
+router.post('/:businessId/pricing/workbooks/:type/validate', workbookUpload, controller.validateWorkbook);
+router.post('/:businessId/pricing/workbooks/:type/commit', controller.commitWorkbook);
+router.get('/:businessId/pricing/workbook-jobs/:jobId', controller.getWorkbookJob);
+router.get('/:businessId/pricing/workbook-jobs/:jobId/result', controller.getWorkbookJobResult);
+router.get('/:businessId/pricing/workbook-jobs/:jobId/download', controller.downloadWorkbookJob);
+module.exports = router;
