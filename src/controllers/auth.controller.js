@@ -21,7 +21,7 @@ async function verifyPhoneOtp(req, res) {
   res.cookie(COOKIE_NAME, session.rawToken, {
     httpOnly: true,
     secure: true,
-    sameSite: 'strict',
+    sameSite: 'none',
     path: '/',
     expires: session.expiresAt,
   });
@@ -30,7 +30,7 @@ async function verifyPhoneOtp(req, res) {
 
 async function logoutUser(req, res) {
   await logout(req.authSession);
-  res.clearCookie(COOKIE_NAME, { httpOnly: true, secure: true, sameSite: 'strict', path: '/' });
+  res.clearCookie(COOKIE_NAME, { httpOnly: true, secure: true, sameSite: 'none', path: '/' });
   res.status(200).json({ success: true, data: { loggedOut: true } });
 }
 
