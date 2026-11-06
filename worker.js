@@ -51,7 +51,7 @@ async function run() {
   console.log('[worker] Background job worker started.');
   let running = true;
   let lastArtifactCleanup = Date.now();
-  const stop = async signal => { running = false; console.log(`[worker] ${signal} received.`); await mongoose.connection.close(); process.exit(0); };
+  const stop = signal => { if (!running) return; running = false; console.log(`[worker] ${signal} received; finishing current task before shutdown.`); };
   process.on('SIGINT', () => stop('SIGINT')); process.on('SIGTERM', () => stop('SIGTERM'));
   while (running) {
     if (Date.now() - lastArtifactCleanup > 60 * 60 * 1000) { await jobs.cleanupExpiredFiles().catch(error => console.error('[worker] Artifact cleanup failed:', error.message)); lastArtifactCleanup = Date.now(); }
@@ -68,6 +68,9 @@ async function run() {
       console.error(`[worker] Job ${job._id} failed:`, error.message);
     } finally { clearInterval(heartbeat); }
   }
+  await mongoose.connection.close();
+  await jobs.closeJobsDatabase();
+  console.log('[worker] Shutdown complete.');
 }
 
 run().catch(error => { console.error('[worker] Fatal error:', error); process.exit(1); });

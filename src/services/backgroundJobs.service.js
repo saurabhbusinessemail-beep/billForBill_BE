@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const { GridFSBucket, ObjectId } = require('mongodb');
 
 let connectionPromise;
+let jobsConnection;
 let Job;
 let bucket;
 
@@ -13,6 +14,7 @@ async function connectJobsDatabase() {
     const dbName = process.env.MONGODB_JOBS_DB || 'billforbill_jobs';
     if (!uri) throw new Error('Set MONGODB_URI or MONGODB_JOBS_URI for background jobs.');
     const connection = mongoose.createConnection(uri, { dbName, maxPoolSize: 5, serverSelectionTimeoutMS: 10000 });
+    jobsConnection = connection;
     connectionPromise = connection.asPromise().then(() => {
       const schema = new mongoose.Schema({
         type: { type: String, required: true, index: true },
@@ -34,6 +36,15 @@ async function connectJobsDatabase() {
   }
   const connection = await connectionPromise;
   return { connection, Job, bucket };
+}
+
+async function closeJobsDatabase() {
+  if (!jobsConnection) return;
+  await jobsConnection.close();
+  jobsConnection = undefined;
+  connectionPromise = undefined;
+  Job = undefined;
+  bucket = undefined;
 }
 
 async function saveFile(buffer, filename, metadata = {}) {
@@ -78,4 +89,4 @@ async function ownedJob(id, businessId, userId) {
   return Model.findOne({ _id: id, businessId: String(businessId), userId: String(userId) }).lean();
 }
 
-module.exports = { connectJobsDatabase, saveFile, readFile, cleanupExpiredFiles, enqueue, ownedJob, get Job() { return Job; }, get bucket() { return bucket; } };
+module.exports = { connectJobsDatabase, closeJobsDatabase, saveFile, readFile, cleanupExpiredFiles, enqueue, ownedJob, get Job() { return Job; }, get bucket() { return bucket; } };
