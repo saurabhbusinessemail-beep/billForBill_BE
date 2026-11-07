@@ -51,7 +51,7 @@ async function copyCatalogUnlocked(business) {
   ]);
   const units = await SourceUnit.find({ _id: { $in: unitIds }, businessId: null }).lean();
   if (units.length !== unitIds.length) throw Object.assign(new Error('The catalog references a missing unit.'), { statusCode: 409, code: 'BUSINESS_TYPE_CATALOG_INCOMPLETE' });
-  if (products.some((product) => !product.baseUnitId)) throw Object.assign(new Error('A product is missing its required base unit.'), { statusCode: 409, code: 'BUSINESS_TYPE_CATALOG_INCOMPLETE' });
+  if (products.some((product) => !product.baseUnitId && !product.needsUnit)) throw Object.assign(new Error('A product is missing its required base unit.'), { statusCode: 409, code: 'BUSINESS_TYPE_CATALOG_INCOMPLETE' });
   const images = await ProductImage.find({ productId: { $in: products.map((p) => p._id) } }).select('productId').lean();
   if (images.length !== products.length) throw Object.assign(new Error('The selected business type has products without images.'), { statusCode: 409, code: 'BUSINESS_TYPE_CATALOG_INCOMPLETE' });
   const maps = Object.fromEntries(['products', 'categories', 'attributes', 'units', 'taxes'].map((name) => [name, new Map()]));

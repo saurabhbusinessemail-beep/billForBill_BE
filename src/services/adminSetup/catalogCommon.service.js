@@ -43,6 +43,15 @@ const nameValue = (value, label, max = 100) => {
   return value.trim();
 };
 const normalized = (value) => value.trim().toLocaleLowerCase('en-IN');
+function normalizeGtin(value) {
+  if (value === null || value === '') return '';
+  const gtin = typeof value === 'string' ? value.trim() : String(value);
+  if (!/^\d+$/.test(gtin) || ![8, 12, 13, 14].includes(gtin.length)) throw error(400, 'INVALID_GTIN', 'Enter a valid 8, 12, 13, or 14 digit barcode / GTIN.');
+  const digits = [...gtin].map(Number); const check = digits.pop();
+  const sum = digits.reverse().reduce((total, digit, index) => total + digit * (index % 2 === 0 ? 3 : 1), 0);
+  if ((10 - (sum % 10)) % 10 !== check) throw error(400, 'INVALID_GTIN', 'The barcode / GTIN check digit is invalid.');
+  return gtin;
+}
 
 function normalize(kind, input, partial = false) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw error(400, 'INVALID_CATALOG', 'Enter valid catalog details.');
@@ -62,6 +71,8 @@ function normalize(kind, input, partial = false) {
   } else if (kind === 'products') {
     take('name', (v) => nameValue(v, 'product name', 160)); take('type', (v) => nameValue(v, 'product type', 50));
     optional('description', (v) => typeof v === 'string' ? v.trim().slice(0, 1000) : '');
+    optional('gtin', normalizeGtin); if (Object.hasOwn(output, 'gtin')) output.normalizedGtin = output.gtin;
+    optional('brand', (v) => { if (v === null || v === '') return ''; if (typeof v !== 'string' || v.trim().length > 120) throw error(400, 'INVALID_BRAND', 'Brand must be 120 characters or fewer.'); return v.trim(); });
     optional('code', (v) => { if (v === null || v === '') return ''; if (typeof v !== 'string' || v.trim().length > 40) throw error(400, 'INVALID_PRODUCT_CODE', 'Enter a product code up to 40 characters.'); return v.trim(); });
     if (Object.hasOwn(output, 'code')) output.normalizedCode = output.code.toLocaleUpperCase('en-IN');
     optional('reorderLevel', (v) => { if (v === null || v === '') return null; const text = String(v).trim(); if (!/^(?:0|[1-9]\d*)(?:\.\d{1,4})?$/.test(text) || text.length > 24 || Number(text) > 10000000000) throw error(400, 'INVALID_REORDER_LEVEL', 'Enter a valid reorder level up to 10 billion using at most four decimal places.'); return mongoose.Types.Decimal128.fromString(text); });
@@ -147,6 +158,13 @@ async function assertProductCodeUnique(data, id, businessId = null) {
   if (id) filter._id = { $ne: id };
   if (await BusinessProduct.exists(filter)) throw error(409, 'PRODUCT_CODE_EXISTS', 'This product code is already used in this business.');
 }
+async function assertProductGtinUnique(data, id, businessId = null) {
+  if (!data.normalizedGtin) return;
+  const Model = scopedConfig('products', businessId).model;
+  const filter = { ...scopeFilter(businessId), normalizedGtin: data.normalizedGtin };
+  if (id) filter._id = { $ne: id };
+  if (await Model.exists(filter)) throw error(409, 'PRODUCT_GTIN_EXISTS', 'This barcode / GTIN is already used in this catalog.');
+}
 
 async function assertCategoryTree(id, parentId, businessId = null) {
   if (!parentId) return;
@@ -190,26 +208,28 @@ async function get(kind, id, businessId = null) {
 }
 async function create(kind, input, businessId = null) {
   assertDatabaseConnected(); const data = normalize(kind, input); await validateRefs(kind, data, businessId); const Model = scopedConfig(kind, businessId).model;
-  await assertUnique(kind, Model, data, null, businessId); if (kind === 'products') { await assertProductNameUnique(data, null, businessId); await assertProductCodeUnique(data, null, businessId); }
+  await assertUnique(kind, Model, data, null, businessId); if (kind === 'products') { await assertProductNameUnique(data, null, businessId); await assertProductCodeUnique(data, null, businessId); await assertProductGtinUnique(data, null, businessId); }
   if (kind === 'categories') await assertCategoryTree(null, data.parentId, businessId);
   try { return present(kind, await Model.create({ ...data, businessId: businessId || null })); }
-  catch (e) { if (e.code === 11000) throw error(409, 'CATALOG_NAME_EXISTS', 'An item with this name already exists.'); throw e; }
+  catch (e) { if (e.code === 11000 && kind === 'products' && data.normalizedGtin) throw error(409, 'PRODUCT_GTIN_EXISTS', 'This barcode / GTIN is already used in this catalog.'); if (e.code === 11000) throw error(409, 'CATALOG_NAME_EXISTS', 'An item with this name already exists.'); throw e; }
 }
 async function update(kind, id, input, businessId = null) {
   assertDatabaseConnected(); if (!validId(id)) throw error(404, 'CATALOG_ITEM_NOT_FOUND', 'Catalog item not found.');
   const Model = scopedConfig(kind, businessId).model; const current = await Model.findOne({ ...scopeFilter(businessId), _id: id }); if (!current) throw error(404, 'CATALOG_ITEM_NOT_FOUND', 'Catalog item not found.');
   const data = normalize(kind, input, true); if (!Object.keys(data).length) throw error(400, 'EMPTY_CATALOG_UPDATE', 'Provide catalog details.');
+  if (kind === 'products' && Object.hasOwn(data, 'baseUnitId')) data.needsUnit = false;
   if (kind === 'categories' && !Object.hasOwn(data, 'parentId')) data.parentId = current.parentId || null;
   await validateRefs(kind, data, businessId); await assertUnique(kind, Model, data, id, businessId);
   if (kind === 'categories' && Object.hasOwn(data, 'parentId')) await assertCategoryTree(id, data.parentId, businessId);
   if (kind === 'products') {
     await assertProductNameUnique({ normalizedName: data.normalizedName || current.normalizedName, categoryIds: data.categoryIds || current.categoryIds }, id, businessId);
     await assertProductCodeUnique({ normalizedCode: Object.hasOwn(data, 'normalizedCode') ? data.normalizedCode : current.normalizedCode }, id, businessId);
+    await assertProductGtinUnique({ normalizedGtin: Object.hasOwn(data, 'normalizedGtin') ? data.normalizedGtin : current.normalizedGtin }, id, businessId);
     if (current.needsUnit && !data.baseUnitId) throw error(400, 'PRODUCT_UNIT_REQUIRED', 'Choose a replacement base unit.');
     if (!(await ProductImage.exists({ productId: id })) && !(current.sourceProductId && await ProductImage.exists({ productId: current.sourceProductId }))) throw error(400, 'PRODUCT_IMAGE_REQUIRED', 'Upload a product image before saving this product.');
   }
   try { return present(kind, await Model.findOneAndUpdate({ ...scopeFilter(businessId), _id: id }, { $set: data }, { new: true, runValidators: true })); }
-  catch (e) { if (e.code === 11000) throw error(409, 'CATALOG_NAME_EXISTS', 'An item with this name already exists.'); throw e; }
+  catch (e) { if (e.code === 11000 && kind === 'products' && Object.hasOwn(data, 'normalizedGtin') && data.normalizedGtin) throw error(409, 'PRODUCT_GTIN_EXISTS', 'This barcode / GTIN is already used in this catalog.'); if (e.code === 11000) throw error(409, 'CATALOG_NAME_EXISTS', 'An item with this name already exists.'); throw e; }
 }
 
 async function remove(kind, id, businessId = null, options = {}) {
@@ -301,4 +321,4 @@ async function deleteImpact(kind, id, businessId = null) {
   return { id: String(id), affected, ...(kind === 'products' && !businessId ? { businessCopyCount } : {}) };
 }
 
-module.exports = { list, get, create, update, remove, deleteImpact, normalize, validateRefs, assertProductNameUnique, present, error, modelFor };
+module.exports = { list, get, create, update, remove, deleteImpact, normalize, validateRefs, assertProductNameUnique, assertProductGtinUnique, normalizeGtin, present, error, modelFor };

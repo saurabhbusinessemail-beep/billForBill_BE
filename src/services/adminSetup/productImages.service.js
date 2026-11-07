@@ -21,6 +21,7 @@ async function createWithImage(input, type, name, bytes, businessId = null) {
   const Product = common.modelFor('products', businessId);
   const values = common.normalize('products', input); await common.validateRefs('products', values, businessId);
   await common.assertProductNameUnique({ ...values, categoryIds: values.categoryIds || [] }, null, businessId);
+  await common.assertProductGtinUnique(values, null, businessId);
   let product;
   try { product = await Product.create({ ...values, businessId: businessId || null }); }
   catch (error) { if (error.code === 11000) throw fail(409, 'PRODUCT_NAME_EXISTS', 'A product with this name already exists.'); throw error; }
@@ -34,7 +35,7 @@ async function replaceImage(productId, type, name, bytes, businessId = null) {
   assertDatabaseConnected(); const safeName = validateImage(type, name, bytes);
   const Product = common.modelFor('products', businessId);
   if (!(await Product.exists({ _id: productId }))) throw fail(404, 'CATALOG_ITEM_NOT_FOUND', 'Product not found.');
-  const image = await ProductImage.findOneAndUpdate({ productId }, { $set: { originalName: safeName, contentType: type, sizeBytes: bytes.length, data: bytes } }, { new: true, upsert: true, runValidators: true }).select('-data');
+  const image = await ProductImage.findOneAndUpdate({ productId }, { $set: { originalName: safeName, contentType: type, sizeBytes: bytes.length, data: bytes }, $unset: { provider: 1, sourceUrl: 1, sourceProductUrl: 1, licenseId: 1, licenseUrl: 1, attribution: 1 } }, { new: true, upsert: true, runValidators: true }).select('-data');
   return { productId: String(image.productId), sizeBytes: image.sizeBytes, contentType: image.contentType };
 }
 

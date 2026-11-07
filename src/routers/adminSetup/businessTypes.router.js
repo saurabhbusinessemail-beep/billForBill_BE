@@ -1,5 +1,15 @@
 'use strict';
-const express = require('express'); const controller = require('../../controllers/adminSetup/businessTypes.controller');
+const express = require('express');
+const controller = require('../../controllers/adminSetup/businessTypes.controller');
+const { requireSuperAdmin } = require('../../middleware/requireSuperAdmin');
 const router = express.Router();
-router.get('/', controller.list); router.post('/', controller.create); router.get('/:id/delete-impact', controller.deleteImpact); router.get('/:id', controller.get); router.put('/:id', controller.update); router.delete('/:id', controller.remove);
+router.get('/open-food-facts-taxonomy', controller.openFoodFactsTaxonomy);
+router.get('/', controller.list);
+router.post('/', controller.create);
+router.put('/:id/open-food-facts-config', controller.saveOpenFoodFactsConfig);
+router.post('/:id/open-food-facts-sync', requireSuperAdmin, controller.syncOpenFoodFacts);
+router.get('/:id/delete-impact', controller.deleteImpact);
+router.get('/:id', controller.get);
+router.put('/:id', controller.update);
+router.delete('/:id', controller.remove);
 module.exports = router;
