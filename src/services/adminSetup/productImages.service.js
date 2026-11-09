@@ -19,15 +19,20 @@ function validateImage(type, name, bytes) {
 async function createWithImage(input, type, name, bytes, businessId = null) {
   assertDatabaseConnected(); const safeName = validateImage(type, name, bytes);
   const Product = common.modelFor('products', businessId);
-  const values = common.normalize('products', input); await common.validateRefs('products', values, businessId);
+  const values = common.normalize('products', input); common.embedUnits(values); await common.validateRefs('products', values, businessId);
   await common.assertProductNameUnique({ ...values, categoryIds: values.categoryIds || [] }, null, businessId);
+  await common.assertProductCodeUnique(values, null, businessId);
   await common.assertProductGtinUnique(values, null, businessId);
   let product;
   try { product = await Product.create({ ...values, businessId: businessId || null }); }
-  catch (error) { if (error.code === 11000) throw fail(409, 'PRODUCT_NAME_EXISTS', 'A product with this name already exists.'); throw error; }
+  catch (error) {
+    if (error.code === 11000 && error.keyPattern?.variantIdentifierKeys) throw fail(409, 'PRODUCT_GTIN_EXISTS', 'This barcode / GTIN is already used in this catalog.');
+    if (error.code === 11000) throw fail(409, 'PRODUCT_NAME_EXISTS', 'A product with this name already exists.');
+    throw error;
+  }
   try {
     await ProductImage.create({ productId: product._id, originalName: safeName, contentType: type, sizeBytes: bytes.length, data: bytes });
-    return common.present('products', product);
+    return await common.present('products', product);
   } catch (error) { await Promise.all([Product.deleteOne({ _id: product._id }), ProductImage.deleteOne({ productId: product._id })]); throw error; }
 }
 

@@ -1,4 +1,11 @@
 'use strict';
+const { stockLines } = require('./serviceProducts');
+
+async function billsWithPhysicalDelivery(businessId, bills) {
+  const detailedLines = bills.flatMap(bill => bill.entryMode === 'detailed' ? bill.lines || [] : []);
+  const goods = new Set(await stockLines(businessId, detailedLines));
+  return bills.filter(bill => bill.entryMode !== 'detailed' || !bill.lines?.length || bill.lines.some(line => goods.has(line)));
+}
 const mongoose = require('mongoose');
 const Delivery = require('../DB/models/BusinessDelivery');
 const Business = require('../DB/models/Business');
@@ -26,7 +33,7 @@ async function validateRequiredFields(bid,type,details){const config=await Trans
 function view(row) { const value = row.toObject ? row.toObject() : row; return { ...value, id: String(value._id), businessId: String(value.businessId), orderId: value.orderId ? String(value.orderId) : null, partyUserId: value.partyUserId ? String(value.partyUserId) : null }; }
 async function nextDeliveryNumber(bid) { try { return (await DeliveryCounter.findOneAndUpdate({businessId:bid},{$inc:{value:1}},{new:true,upsert:true,setDefaultsOnInsert:true})).value; } catch(error) { if(error.code!==11000) throw error; return (await DeliveryCounter.findOneAndUpdate({businessId:bid},{$inc:{value:1}},{new:true})).value; } }
 async function configuredDeliveryPrefix(bid) { const config=await NumberConfig.findOne({businessId:bid}).select('deliveryPrefix').lean(); return config?.deliveryPrefix||'DLV'; }
-async function createDraftFromBill(bill, uid) { const existing=await Delivery.findOne({businessId:bill.businessId,billId:bill._id,status:{$ne:'cancelled'}}); if(existing)return view(existing); const [business,party]=await Promise.all([Business.findById(bill.businessId).select('address').lean(),bill.partyUserId?User.findById(bill.partyUserId).select('addresses').lean():null]); const address=party?.addresses?.[0]; const [value,prefix]=await Promise.all([nextDeliveryNumber(bill.businessId),configuredDeliveryPrefix(bill.businessId)]); return view(await Delivery.create({businessId:bill.businessId,deliveryNumber:`${prefix}-${value}`,status:'draft',sourceType:bill.orderId?'order':'party',orderId:bill.orderId,billId:bill._id,partyUserId:bill.partyUserId,partyName:bill.partySnapshot?.name||'',partyPhone:bill.partySnapshot?.phone||'',deliveryDate:new Date().toISOString().slice(0,10),fromAddress:business?.address||'',toAddress:bill.partySnapshot?.address|| (address?[address.line1,address.line2,address.city,address.state,address.pincode,address.country].filter(Boolean).join(', '):''),transportType:'',transportDetails:{},events:[{status:'draft',at:new Date(),actorUserId:uid}],createdByUserId:uid,updatedByUserId:uid})); }
+async function createDraftFromBill(bill, uid) { if (!(await billsWithPhysicalDelivery(bill.businessId, [bill])).length) return null; const existing=await Delivery.findOne({businessId:bill.businessId,billId:bill._id,status:{$ne:'cancelled'}}); if(existing)return view(existing); const [business,party]=await Promise.all([Business.findById(bill.businessId).select('address').lean(),bill.partyUserId?User.findById(bill.partyUserId).select('addresses').lean():null]); const address=party?.addresses?.[0]; const [value,prefix]=await Promise.all([nextDeliveryNumber(bill.businessId),configuredDeliveryPrefix(bill.businessId)]); return view(await Delivery.create({businessId:bill.businessId,deliveryNumber:`${prefix}-${value}`,status:'draft',sourceType:bill.orderId?'order':'party',orderId:bill.orderId,billId:bill._id,partyUserId:bill.partyUserId,partyName:bill.partySnapshot?.name||'',partyPhone:bill.partySnapshot?.phone||'',deliveryDate:new Date().toISOString().slice(0,10),fromAddress:business?.address||'',toAddress:bill.partySnapshot?.address|| (address?[address.line1,address.line2,address.city,address.state,address.pincode,address.country].filter(Boolean).join(', '):''),transportType:'',transportDetails:{},events:[{status:'draft',at:new Date(),actorUserId:uid}],createdByUserId:uid,updatedByUserId:uid})); }
 async function list(bid, uid, query) {
   await authorize(bid, uid);
   const filter = { businessId: bid };
@@ -38,11 +45,20 @@ async function list(bid, uid, query) {
   }
   const rows = await Delivery.find(filter).sort({ updatedAt: -1 }).limit(250).lean();
   const orderIds = [...new Set(rows.map(row => String(row.orderId || '')).filter(Boolean))];
-  const orderRows = orderIds.length ? await Order.find({ _id: { $in: orderIds }, businessId: bid }).select('orderNumber').lean() : [];
+  const billIds = [...new Set(rows.map(row => String(row.billId || '')).filter(Boolean))];
+  const [orderRows, billRows] = await Promise.all([
+    orderIds.length ? Order.find({ _id: { $in: orderIds }, businessId: bid }).select('orderNumber').lean() : [],
+    billIds.length ? Bill.find({ _id: { $in: billIds }, businessId: bid, deletedAt: null }).select('billNumber').lean() : [],
+  ]);
   const orderNumbers = new Map(orderRows.map(row => [String(row._id), row.orderNumber || '']));
+  const billNumbers = new Map(billRows.map(row => [String(row._id), row.billNumber || '']));
   const permission = await access(bid, uid);
   return {
-    items: rows.map(row => ({ ...view(row), orderNumber: orderNumbers.get(String(row.orderId || '')) || '' })),
+    items: rows.map(row => ({
+      ...view(row),
+      orderNumber: orderNumbers.get(String(row.orderId || '')) || '',
+      billNumber: billNumbers.get(String(row.billId || '')) || '',
+    })),
     authorization: { isOwner: permission.owner, permissionKeys: [...permission.keys], canEditDate: permission.owner || permission.keys.has('business.deliveries.date.manage') },
   };
 }
@@ -53,12 +69,13 @@ async function eligibleOrders(bid, uid, deliveryId) {
     ? await Delivery.findOne({ _id: deliveryId, businessId: bid }).select('orderId').lean()
     : null;
   const selectedOrderId = selectedDelivery?.orderId || null;
-  const [billOrderIds, business, activeDeliveries] = await Promise.all([
-    Bill.distinct('orderId', { businessId: bid, status: 'issued', deliveryStatus: 'in_transit', deletedAt: null, orderId: { $ne: null } }),
+  const [bills, business, activeDeliveries] = await Promise.all([
+    Bill.find({ businessId: bid, status: 'issued', deliveryStatus: 'in_transit', deletedAt: null, orderId: { $ne: null } }).select('orderId entryMode lines').lean(),
     Business.findById(bid).select('legalName phone address').lean(),
     Delivery.find({ businessId: bid, status: { $ne: 'cancelled' }, orderId: { $ne: null } }).select('orderId status').lean(),
   ]);
   const deliveryByOrder = new Map(activeDeliveries.map(row => [String(row.orderId), row]));
+  const billOrderIds = [...new Set((await billsWithPhysicalDelivery(bid, bills)).map(bill => String(bill.orderId)))];
   const eligibleIds = billOrderIds.filter(orderId => {
     const existing = deliveryByOrder.get(String(orderId));
     return !existing || existing.status === 'draft' || String(orderId) === String(selectedOrderId || '');
@@ -90,7 +107,11 @@ async function create(bid, uid, body) { await authorize(bid, uid); const value =
   else { if(!value.partyName||!value.partyPhone)throw fail(400,'PARTY_REQUIRED','Choose an existing party.'); const clauses=[{'partySnapshot.phone':value.partyPhone}];if(value.partyUserId)clauses.push({partyUserId:value.partyUserId});const partyBill=await Bill.exists({businessId:bid,status:{$ne:'cancelled'},$or:clauses});if(!partyBill)throw fail(400,'PARTY_INELIGIBLE','Choose a party with a bill in this business.'); }
   if(!value.fromAddress||!value.toAddress)throw fail(400,'ADDRESS_REQUIRED','Enter both route addresses.'); await validateRequiredFields(bid,value.transportType,value.transportDetails);
   const billFilter = value.orderId ? { businessId: bid, orderId: value.orderId, status: 'issued', deliveryStatus: 'in_transit', deletedAt: null } : { businessId: bid, ...(value.partyUserId?{partyUserId:value.partyUserId}:{'partySnapshot.phone':value.partyPhone}), status: 'issued', deliveryStatus: 'in_transit', deletedAt: null };
-  const bill = await Bill.findOne(billFilter).sort({ createdAt: -1 }).select('_id').lean(); if(!bill)throw fail(400,'BILL_REQUIRED','A delivery can only be created for an issued bill in transit.'); value.billId = bill._id; const existingDelivery=await Delivery.exists({businessId:bid,billId:bill._id,status:{$ne:'cancelled'}});if(existingDelivery)throw fail(409,'DELIVERY_ALREADY_EXISTS','This bill already has an active delivery. Open it from the Transport list.');
+  const bills = await Bill.find(billFilter).sort({ createdAt: -1 }).select('_id entryMode lines').lean();
+  if (!bills.length) throw fail(400, 'BILL_REQUIRED', 'A delivery can only be created for an issued bill in transit.');
+  const [bill] = await billsWithPhysicalDelivery(bid, bills);
+  if (!bill) throw fail(400, 'SERVICE_DELIVERY_NOT_REQUIRED', 'Service-only bills do not require a delivery record.');
+  value.billId = bill._id; const existingDelivery=await Delivery.exists({businessId:bid,billId:bill._id,status:{$ne:'cancelled'}});if(existingDelivery)throw fail(409,'DELIVERY_ALREADY_EXISTS','This bill already has an active delivery. Open it from the Transport list.');
   if (value.partyUserId) { const party = await User.findById(value.partyUserId).select('addresses').lean(); const address = party?.addresses?.[0]; if (!value.toAddress && address) value.toAddress = [address.line1,address.line2,address.city,address.state,address.pincode,address.country].filter(Boolean).join(', '); }
   const [number,prefix]=await Promise.all([nextDeliveryNumber(bid),configuredDeliveryPrefix(bid)]); const row = await Delivery.create({ businessId: bid, deliveryNumber: `${prefix}-${number}`, ...value, fromAddress: value.fromAddress || business.address || '', status: 'draft', createdByUserId: uid, updatedByUserId: uid, events: [{ status: 'draft', at: new Date(), actorUserId: uid }] }); return view(row); }
 async function update(bid, uid, did, body) { await authorize(bid, uid); const row = await Delivery.findOne({ _id: did, businessId: bid }); if (!row) throw fail(404,'DELIVERY_NOT_FOUND','Delivery not found.'); if (row.status !== 'draft') throw fail(409,'DELIVERY_NOT_EDITABLE','Only draft deliveries can be edited.'); const value=clean(body); if(!value.fromAddress||!value.toAddress)throw fail(400,'ADDRESS_REQUIRED','Enter both route addresses.'); const permission=await access(bid,uid); const canEditDate=permission.owner||permission.keys.has('business.deliveries.date.manage'); if(!canEditDate)value.deliveryDate=row.deliveryDate; await validateRequiredFields(bid,value.transportType,value.transportDetails); Object.assign(row, value, { updatedByUserId: uid }); await row.save(); return view(row); }

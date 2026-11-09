@@ -6,7 +6,8 @@ const metadata = (req) => { try { return JSON.parse(req.get('X-Order-Metadata') 
 module.exports = {
   list: run(req => service.listOrders(req.params.businessId, req.authUserId, req.query)),
   summary: run(req => service.summary(req.params.businessId, req.authUserId)),
-  options: run(req => service.getOptions(req.params.businessId, req.authUserId)),
+  options: run(req => service.getOptions(req.params.businessId, req.authUserId, 'business.orders.view', req.query.includeProducts !== 'false')),
+  searchProducts: run(req => service.searchProducts(req.params.businessId, req.authUserId, req.query.q)),
   leadOptions: run(req => service.getOptions(req.params.businessId, req.authUserId, 'business.leads.view')),
   lookupContact: run(req => service.lookupContact(req.params.businessId, req.authUserId, req.query)),
   lookupLeadContact: run(req => service.lookupContact(req.params.businessId, req.authUserId, req.query, 'business.leads.create')),

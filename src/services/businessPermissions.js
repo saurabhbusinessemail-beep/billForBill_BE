@@ -3,6 +3,7 @@ const BUSINESS_PERMISSIONS = [
   ['dashboard.view', 'dashboard', 'permission.dashboard.label', 'permission.dashboard.description'],
   ['business.details.update', 'business', 'permission.businessDetails.label', 'permission.businessDetails.description'],
   ['business.logo.update', 'business', 'permission.businessLogo.label', 'permission.businessLogo.description'],
+  ['business.openingBalances.manage', 'business', 'permission.openingBalances.label', 'permission.openingBalances.description'],
   ['people.view', 'people', 'permission.peopleView.label', 'permission.peopleView.description'],
   ['people.add', 'people', 'permission.peopleAdd.label', 'permission.peopleAdd.description'],
   ['people.remove', 'people', 'permission.peopleRemove.label', 'permission.peopleRemove.description'],

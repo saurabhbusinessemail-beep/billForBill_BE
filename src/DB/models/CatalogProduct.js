@@ -1,6 +1,19 @@
 'use strict';
+
 const mongoose = require('mongoose');
-const schema = new mongoose.Schema({ businessId: { type: mongoose.Schema.Types.ObjectId, ref: 'Business', default: null, index: true }, name: { type: String, required: true, trim: true, maxlength: 160 }, normalizedName: { type: String, required: true, trim: true, lowercase: true, index: true }, gtin: { type: String, trim: true, maxlength: 14, default: '' }, normalizedGtin: { type: String, trim: true, maxlength: 14, default: '' }, brand: { type: String, trim: true, maxlength: 120, default: '' }, externalSource: { type: String, enum: ['open_food_facts'], default: undefined }, externalProductId: { type: String, trim: true, maxlength: 32, default: '' }, externalProductUrl: { type: String, trim: true, maxlength: 2048, default: '' }, externalUpdatedAt: { type: Date, default: null }, lastSyncedAt: { type: Date, default: null }, type: { type: String, required: true, trim: true, maxlength: 50 }, description: { type: String, trim: true, maxlength: 1000, default: '' }, categoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'ProductCategory' }], baseUnitId: { type: mongoose.Schema.Types.ObjectId, ref: 'CatalogUnit', default: null }, additionalUnits: [{ unitId: { type: mongoose.Schema.Types.ObjectId, ref: 'CatalogUnit', required: true }, conversionFactor: { type: Number, required: true, min: Number.MIN_VALUE } }], attributeIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'ProductAttribute' }], pendingAttributes: [{ id: { type: String, trim: true, maxlength: 160 }, groupId: { type: String, trim: true, maxlength: 160 }, groupName: { type: String, trim: true, maxlength: 160 }, name: { type: String, trim: true, maxlength: 160 }, value: { type: String, trim: true, maxlength: 500 }, status: { type: String, trim: true, maxlength: 40 }, match: { type: String, trim: true, maxlength: 40 }, description: { type: String, trim: true, maxlength: 500 } }], taxMode: { type: String, enum: ['inherit', 'specific'], default: 'inherit' }, taxComponentIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'TaxComponent' }], needsUnit: { type: Boolean, default: false } }, { timestamps: true });
-schema.index({ normalizedGtin: 1 }, { unique: true, partialFilterExpression: { normalizedGtin: { $type: 'string', $gt: '' } } });
-schema.index({ externalSource: 1, externalProductId: 1 }, { unique: true, partialFilterExpression: { externalSource: { $type: 'string' }, externalProductId: { $type: 'string', $gt: '' } } });
+const { productFields, legacyProductFields, legacyUnitReferences, validateLegacyUnits } = require('./productFields');
+const { ObjectId } = mongoose.Schema.Types;
+
+const schema = new mongoose.Schema({
+  businessId: { type: ObjectId, ref: 'Business', default: null, index: true },
+  ...productFields,
+  categoryIds: [{ type: ObjectId, ref: 'ProductCategory' }],
+  attributeIds: [{ type: ObjectId, ref: 'ProductAttribute' }],
+  taxComponentIds: [{ type: ObjectId, ref: 'TaxComponent' }],
+  ...legacyProductFields,
+  ...legacyUnitReferences('CatalogUnit'),
+}, { timestamps: true });
+
+validateLegacyUnits(schema);
+schema.index({ variantIdentifierKeys: 1 }, { unique: true, partialFilterExpression: { variantIdentifierKeys: { $type: 'string' } } });
 module.exports = mongoose.models.CatalogProduct || mongoose.model('CatalogProduct', schema);

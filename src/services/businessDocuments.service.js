@@ -1,5 +1,6 @@
 'use strict';
 const mongoose = require('mongoose');
+const crypto = require('node:crypto');
 const Business = require('../DB/models/Business');
 const BusinessOrder = require('../DB/models/BusinessOrder');
 const BusinessLead = require('../DB/models/BusinessLead');
@@ -8,13 +9,16 @@ const BusinessBill = require('../DB/models/BusinessBill');
 const BusinessDocumentNumberConfig = require('../DB/models/BusinessDocumentNumberConfig');
 const BusinessPaymentAllocation = require('../DB/models/BusinessPaymentAllocation');
 const Product = require('../DB/models/BusinessCatalogProduct');
-const Unit = require('../DB/models/BusinessCatalogUnit');
+const productUnits = require('./productUnits');
 const Tax = require('../DB/models/BusinessCatalogTax');
 const Pricing = require('../DB/models/BusinessProductPricing');
 const User = require('../DB/models/User');
 const RateLimitWindow = require('../DB/models/RateLimitWindow');
 const { access } = require('./businessPeopleTeams.service');
 const { normalizePhone } = require('../utils/phone');
+const { businessCurrency } = require('./businessCurrency');
+const { measurement, rateSeconds, isNonDurationService } = require('./serviceMeasurement');
+const { isServiceType } = require('./serviceProducts');
 
 const fail = (statusCode, code, message) => Object.assign(new Error(message), { statusCode, code, expose: statusCode < 500 });
 const idOk = (id) => mongoose.isValidObjectId(id);
@@ -62,7 +66,11 @@ function discountAmount(base, discount) {
 function calculate(lines, discounts, taxes) {
   const normalized = (lines || []).map(line => {
     const quantity = micro(line.quantity, 'quantity', true); const price = micro(line.unitPrice, 'unit price');
-    const gross = currency(divideRound(quantity * price, SCALE)); const lineDiscount = discountAmount(gross, line.discount); const net = gross - lineDiscount.amount;
+    const durationUnit = !line.manualQuantity && line.serviceRange && rateSeconds[line.rateBasis];
+    const gross = durationUnit
+      ? divideRound(BigInt(line.serviceRange.durationSeconds) * price, BigInt(durationUnit) * CENT) * CENT
+      : currency(divideRound(quantity * price, SCALE));
+    const lineDiscount = discountAmount(gross, line.discount); const net = gross - lineDiscount.amount;
     return { ...line, quantity: String(line.quantity), unitPrice: String(line.unitPrice), grossTotal: moneyText(gross), discount: lineDiscount.snapshot, lineTotal: moneyText(net) };
   });
   const subtotal = normalized.reduce((sum, line) => sum + micro(line.lineTotal, 'line total'), 0n);
@@ -79,6 +87,7 @@ async function authorize(businessId, userId, permission) { return access(busines
 function pageValues(query) { const page = Math.max(1, Number.parseInt(query.page, 10) || 1); const pageSize = Math.min(50, Math.max(1, Number.parseInt(query.pageSize, 10) || 20)); return { page, pageSize, skip: (page - 1) * pageSize }; }
 function serialize(document) {
   const value = document.toObject ? document.toObject() : document;
+  value.lines = (value.lines || []).map((line, index) => ({ ...line, lineId: line.lineId || String(line._id || `legacy_${index}`) }));
   for (const field of ['subtotal', 'discountTotal', 'afterDiscount', 'taxTotal', 'grandTotal']) if (value[field]?.toString) value[field] = value[field].toString();
   return { ...value, id: String(value._id), businessId: String(value.businessId), sourceLeadId: value.sourceLeadId ? String(value.sourceLeadId) : null, convertedOrderId: value.convertedOrderId ? String(value.convertedOrderId) : null, imageIds: (value.imageIds || []).map(String) };
 }
@@ -148,6 +157,7 @@ async function taxSnapshot(bid, productIds, documentDate, suppliedIds) {
     .map(tax => ({ taxId: String(tax._id), name: tax.name, calculationType: tax.calculationType, value: String(tax.value), currency: tax.currency || '', jurisdiction: tax.jurisdiction || '', description: tax.description || '', effectiveStart: tax.effectiveStart?.toISOString() || null, effectiveEnd: tax.effectiveEnd?.toISOString() || null, revision: tax.updatedAt?.toISOString() || tax.createdAt?.toISOString() }));
 }
 async function normalizeDocument(bid, uid, body, type, old = null) {
+  const business = await Business.findById(bid).select('currencyCode timeZone').lean();
   const entryMode = body.entryMode || old?.entryMode || 'detailed';
   if (!['detailed', 'image_only'].includes(entryMode)) throw fail(400, 'INVALID_ENTRY_MODE', 'Choose a valid order entry mode.');
   const documentDate = validTimestamp(body.documentDate || old?.documentDate, 'order');
@@ -175,33 +185,59 @@ async function normalizeDocument(bid, uid, body, type, old = null) {
     const products = await Product.find({ businessId: bid, _id: { $in: productIds } }).lean(); if (products.length !== productIds.length) throw fail(400, 'INVALID_PRODUCT', 'One or more products are unavailable.');
     const productById = new Map(products.map(x => [String(x._id), x]));
     const lines = [];
-    for (const line of linesInput) {
+    for (const [lineIndex, line] of linesInput.entries()) {
       const product = productById.get(String(line.productId));
-      const unitId = String(line.unitId || product.baseUnitId || '');
-      if (!idOk(unitId)) throw fail(400, 'INVALID_UNIT', 'Choose a valid product unit.');
-      const unit = await Unit.findOne({ _id: unitId, businessId: bid }).lean();
-      const unitAllowed = String(product.baseUnitId) === unitId || (product.additionalUnits || []).some(x => String(x.unitId) === unitId);
-      if (!unit || !unitAllowed) throw fail(400, 'INVALID_UNIT', 'Choose an available unit for each product.');
-      const oldLine = old?.lines?.find(saved => String(saved.productId) === String(line.productId) && String(saved.unitId) === unitId);
+      const oldLine = old?.lines?.find((saved, savedIndex) => String(saved.lineId || saved._id || `legacy_${savedIndex}`) === String(line.lineId || line._id || `legacy_${lineIndex}`) && String(saved.productId) === String(line.productId) && String(saved.unitKey || saved.unitId || '') === String(line.unitKey || line.unitId || ''));
+      const variations = productUnits.variations(product);
+      const variantKey = line.variantKey || productUnits.legacyVariantKey(product);
+      const variant = variations.find(candidate => candidate.key === variantKey);
+      const { baseUnit } = productUnits.dto(product, variantKey);
+      const unitKey = String(line.unitKey || baseUnit?.key || '');
+      const service = isServiceType(product.type);
+      const mode = service ? product.serviceMeasurement || 'date_time' : null;
+      const savedRange = oldLine?.serviceRange;
+      const sameRange = !savedRange ? !line.serviceRange : ['startDate', 'endDate', 'startTime', 'endTime'].every(key => savedRange[key] === line.serviceRange?.[key]);
+      const sameVariant = oldLine && (oldLine.variantKey || productUnits.legacyVariantKey(product)) === variantKey;
+      const manualQuantity = service && line.manualQuantity === true;
+      const unchanged = sameVariant && sameRange && String(oldLine.quantity) === String(line.quantity) && String(oldLine.unitPrice) === String(line.unitPrice) && Boolean(oldLine.manualOverride) === Boolean(line.manualOverride) && Boolean(oldLine.manualQuantity) === manualQuantity && !customerChanged;
+      if (unchanged) { lines.push({ ...oldLine, discount: line.discount }); continue; }
+      if (!variant) throw fail(400, 'INVALID_PRODUCT_VARIANT', 'Choose an available product variant.');
+      const unit = sameVariant && (oldLine.factorToBase || oldLine.conversionFactor) ? { key: unitKey, name: oldLine.unitLabel, symbol: oldLine.unitSymbol || baseUnit?.symbol || '', factorToBase: String(oldLine.factorToBase || oldLine.conversionFactor) } : productUnits.options(product, variantKey).find(u => u.key === unitKey);
+      if (!sameVariant && line.unitConfigRevision && line.unitConfigRevision !== productUnits.revision(product, variantKey)) throw fail(409, 'PRODUCT_UNIT_CONFIG_STALE', 'Product units changed. Reload the product choices.');
+      if (!unit || !baseUnit) throw fail(400, 'INVALID_PRODUCT_UNIT', 'Choose an active unit belonging to this product.');
       let sourcePrice = null; let sourceRevision = null; let priceOrigin = line.manualOverride || line.priceOrigin === 'manual' ? 'manual' : 'master'; let unitPrice = line.unitPrice;
       const pricing = await Pricing.findOne({ businessId: bid, productId: product._id }).lean();
-      if (type === 'sales' && pricing) {
-        const matches = (pricing.rules || []).filter(rule => rule.active && (!rule.customerUserId || String(rule.customerUserId) === String(contactUserId)) && (rule.minimumQuantity == null || Number(line.quantity) >= rule.minimumQuantity))
+      const variantPrice = pricing?.variantPrices?.find(price => price.variantKey === variantKey);
+      const configuredRate = isNonDurationService(mode) && variantPrice?.basis !== 'fixed'
+        ? null : type === 'sales' ? variantPrice?.sellingPrice : variantPrice?.purchaseCost;
+      const range = mode ? measurement(mode, line.serviceRange, business?.timeZone || 'Asia/Kolkata', savedRange?.mode === mode ? savedRange.startDate : undefined) : null;
+      const rateBasis = range && configuredRate != null ? variantPrice.basis : 'fixed';
+      const durationUnit = range && !manualQuantity && rateSeconds[rateBasis];
+      const quantity = durationUnit
+        ? (range.durationSeconds / durationUnit).toFixed(6)
+        : line.quantity ?? (range ? '1' : undefined);
+      const baseQuantity = productUnits.multiply(quantity, unit.factorToBase);
+      if (configuredRate != null) {
+        sourcePrice = configuredRate.toString();
+        sourceRevision = `${pricing.version}:variant:${variantKey}`;
+        if (priceOrigin === 'master') unitPrice = range || Number(sourcePrice) === 0 ? sourcePrice : productUnits.multiply(sourcePrice, unit.factorToBase);
+      } else if (!range && variantKey === 'default' && type === 'sales' && pricing) {
+        const matches = (pricing.rules || []).filter(rule => rule.active && (!rule.customerUserId || String(rule.customerUserId) === String(contactUserId)) && (rule.minimumQuantity == null || Number(baseQuantity) >= rule.minimumQuantity))
           .sort((a, b) => Number(Boolean(b.customerUserId)) - Number(Boolean(a.customerUserId)) || (b.minimumQuantity || 0) - (a.minimumQuantity || 0));
         const selected = matches[0]; sourcePrice = selected ? selected.sellingPrice?.toString() : pricing.defaultSellingPrice?.toString();
         sourceRevision = selected?._id ? `${pricing.version}:${selected._id}:${selected.updatedAt?.toISOString() || ''}` : `${pricing.version}:default:${pricing.updatedAt?.toISOString() || ''}`;
-        if (priceOrigin === 'master' && sourcePrice != null) unitPrice = sourcePrice;
-      } else if (type === 'purchase' && pricing?.purchaseCost != null) {
+        if (priceOrigin === 'master' && sourcePrice != null) unitPrice = Number(sourcePrice) === 0 ? '0' : productUnits.multiply(sourcePrice, unit.factorToBase, 6, 999999999999n);
+      } else if (!range && variantKey === 'default' && type === 'purchase' && pricing?.purchaseCost != null) {
         sourcePrice = pricing.purchaseCost.toString(); sourceRevision = `${pricing.version}:purchase:${pricing.updatedAt?.toISOString() || ''}`;
-        if (priceOrigin === 'master') unitPrice = sourcePrice;
+        if (priceOrigin === 'master') unitPrice = Number(sourcePrice) === 0 ? '0' : productUnits.multiply(sourcePrice, unit.factorToBase);
       }
       // Saved snapshots remain authoritative on an ordinary edit. Re-resolve only
       // when customer/quantity changed or the row is new; manual overrides survive.
-      if (oldLine && !oldLine.manualOverride && !customerChanged && String(oldLine.quantity) === String(line.quantity)) {
+      if (!range && sameVariant && sameRange && !oldLine.manualOverride && priceOrigin === 'master' && !customerChanged && String(oldLine.quantity) === String(line.quantity)) {
         unitPrice = oldLine.unitPrice; sourcePrice = oldLine.sourcePrice; sourceRevision = oldLine.sourcePriceRevision; priceOrigin = oldLine.priceOrigin || 'master';
       }
       if (unitPrice == null || unitPrice === '') throw fail(400, 'PRICE_REQUIRED', `Enter a price for ${product.name}.`);
-      lines.push({ ...line, productId: String(product._id), productName: product.name, productCode: product.code || '', productDescription: product.description || '', unitId, unitLabel: unit.name, conversionFactor: String(product.baseUnitId && String(product.baseUnitId) === unitId ? 1 : product.additionalUnits.find(x => String(x.unitId) === unitId)?.conversionFactor || 1), priceOrigin: sourcePrice == null ? 'manual' : priceOrigin, sourcePrice, sourcePriceRevision: sourceRevision, unitPrice: String(unitPrice), manualOverride: priceOrigin === 'manual' });
+      const snapshot = { ...line, quantity, manualQuantity, productType: service ? 'Services' : 'Goods', variantKey, variantValues: variant.values || {}, serviceRange: range, rateBasis, lineId: oldLine?.lineId || crypto.randomUUID(), productId: String(product._id), productName: product.name, productCode: product.code || '', productDescription: product.description || '', unitKey, unitLabel: unit.name, unitSymbol: unit.symbol, unitConfigRevision: (sameVariant && oldLine.unitConfigRevision) || productUnits.revision(product, variantKey), factorToBase: unit.factorToBase, conversionFactor: unit.factorToBase, baseUnitKey: baseUnit.key, baseUnitName: baseUnit.name, baseUnitSymbol: baseUnit.symbol, baseQuantity, priceOrigin: sourcePrice == null ? 'manual' : priceOrigin, sourcePrice, sourcePriceRevision: sourceRevision, unitPrice: String(unitPrice), manualOverride: sourcePrice == null || priceOrigin === 'manual' }; delete snapshot.unitId; lines.push(snapshot);
     }
     const desiredDiscounts = body.discounts ?? old?.discounts ?? [];
     const requestedTaxes = body.taxes;
@@ -216,7 +252,7 @@ async function normalizeDocument(bid, uid, body, type, old = null) {
     calculated = calculate(lines, desiredDiscounts, taxes);
     calculated.taxSelectionSet = taxSelectionSet;
   }
-  return { entryMode, documentDate, createdAtClient, contactType: entryMode === 'detailed' ? contactType : null, contactUserId, contactSnapshot, currencyCode: old?.currencyCode || null, currencyScale: old?.currencyScale ?? null, taxSelectionSet: calculated.taxSelectionSet ?? old?.taxSelectionSet ?? false, ...calculated };
+  return { entryMode, documentDate, createdAtClient, contactType: entryMode === 'detailed' ? contactType : null, contactUserId, contactSnapshot, currencyCode: old?.currencyCode || businessCurrency(business), currencyScale: old?.currencyScale ?? 2, taxSelectionSet: calculated.taxSelectionSet ?? old?.taxSelectionSet ?? false, ...calculated };
 }
 async function validateDeliveredOrderStock(bid, orderType, entryMode, lines, deliveryCompleted) {
   if (deliveryCompleted && orderType === 'sales' && entryMode === 'detailed') await require('./businessInventory.service').validateBillStock(bid, { billType: 'sale', lines });
@@ -268,12 +304,15 @@ async function updateDocument(Model, bid, uid, id, body, type, isLead = false) {
   const document = await Model.findOne({ _id: id, businessId: bid, deletedAt: null });
   if (!document) throw fail(404, 'DOCUMENT_NOT_FOUND', 'Document not found.');
   if (document.status !== 'open') throw fail(409, 'DOCUMENT_IMMUTABLE', 'Only open documents can be edited.');
+  if (!isLead && await BusinessBill.exists({ businessId: bid, orderId: id, deletedAt: null })) {
+    throw fail(409, 'DOCUMENT_IMMUTABLE', 'Orders with a linked bill cannot be edited.');
+  }
   if (Number(body.version) !== document.version) throw fail(409, 'DOCUMENT_STALE', 'This document changed elsewhere. Reload and try again.');
   if (!isLead && document.entryMode === 'image_only') {
     if (body.entryMode !== 'image_only') throw fail(400, 'INVALID_ENTRY_MODE', 'Image-only orders must remain image-only.');
     if (body.acknowledgedNoStoreChange !== true) throw fail(400, 'IMAGE_ACK_REQUIRED', 'Confirm that the image will not change the store.');
     if (!document.imageIds.length) throw fail(400, 'ORDER_IMAGE_REQUIRED', 'Upload one order image before saving.');
-    const imageDate = validTimestamp(body.documentDate, 'order'); const code = String(body.currencyCode || '').trim().toUpperCase();
+    const imageDate = validTimestamp(body.documentDate, 'order'); const code = document.currencyCode || businessCurrency();
     if (!/^[A-Z]{3}$/.test(code)) throw fail(409, 'CURRENCY_NOT_CONFIGURED', 'Choose a valid three-letter order currency before saving this order.');
     const taxable = moneyText(micro(body.imageAmounts?.taxableAmount, 'taxable amount')); const tax = moneyText(micro(body.imageAmounts?.taxAmount ?? '0', 'tax amount'));
     const total = moneyText(micro(taxable, 'taxable amount') + micro(tax, 'tax amount'));
@@ -292,7 +331,7 @@ async function updateDocument(Model, bid, uid, id, body, type, isLead = false) {
     try { await document.save(); return serialize(document); }
     catch (error) { if (provisionedUser) await cleanupUnlinkedProvisionedUser(provisionedUser._id); throw error; }
   }
-  const discountSelection = value => JSON.stringify({ order: (value.discounts || []).map(item => ({ type: item.type, value: String(item.value) })), lines: (value.lines || []).map(line => ({ productId: String(line.productId), unitId: String(line.unitId), type: line.discount?.type || null, value: line.discount ? String(line.discount.value) : null })).sort((a, b) => `${a.productId}:${a.unitId}`.localeCompare(`${b.productId}:${b.unitId}`)) });
+  const discountSelection = value => JSON.stringify({ order: (value.discounts || []).map(item => ({ type: item.type, value: String(item.value) })), lines: (value.lines || []).map(line => ({ productId: String(line.productId), unitKey: String(line.unitKey || line.unitId), type: line.discount?.type || null, value: line.discount ? String(line.discount.value) : null })).sort((a, b) => `${a.productId}:${a.unitKey}`.localeCompare(`${b.productId}:${b.unitKey}`)) });
   const taxSelection = value => JSON.stringify((value.taxes || []).map(tax => String(tax.taxId)).sort());
   const beforeDiscount = discountSelection(document); const beforeTaxes = taxSelection(document);
   const normalized = await normalizeDocument(bid, uid, body, type || 'sales', document.toObject());
@@ -384,11 +423,43 @@ async function transitionOrder(bid, uid, id, body) {
   order.version += 1; order.updatedByUserId = uid; order.lifecycleEvents.push({ action: action === 'generate_bill' ? (order.deliveryCompleted ? 'bill_generated_and_delivered' : 'bill_generated') : action, actorUserId: uid, at: now });
   await order.save(); await syncLeadOrderStatus(order, uid, `source_order_${action}`); return serialize(order);
 }
-async function getOptions(bid, uid, permission = 'business.orders.view') {
-  await authorize(bid, uid, permission);
-  const [products, units, taxes] = await Promise.all([Product.find({ businessId: bid }).lean(), Unit.find({ businessId: bid }).lean(), Tax.find({ businessId: bid }).lean()]);
-  const prices = await Pricing.find({ businessId: bid }).lean(); const priceByProduct = new Map(prices.map(x => [String(x.productId), x]));
-  return { products: products.map(product => { const price = priceByProduct.get(String(product._id)); return { id: String(product._id), name: product.name, code: product.code || '', description: product.description || '', baseUnitId: product.baseUnitId ? String(product.baseUnitId) : null, additionalUnits: (product.additionalUnits || []).map(unit => ({ unitId: String(unit.unitId), conversionFactor: unit.conversionFactor })), taxMode: product.taxMode, taxComponentIds: (product.taxComponentIds || []).map(String), price: price ? { defaultSellingPrice: price.defaultSellingPrice?.toString() || null, purchaseCost: price.purchaseCost?.toString() || null, rules: (price.rules || []).map(r => ({ id: String(r._id), customerUserId: r.customerUserId ? String(r.customerUserId) : null, minimumQuantity: r.minimumQuantity, sellingPrice: r.sellingPrice.toString(), active: r.active })), version: price.version } : null }; }), units: units.map(unit => ({ id: String(unit._id), name: unit.name, symbol: unit.symbol })), taxes: taxes.map(tax => ({ id: String(tax._id), name: tax.name, calculationType: tax.calculationType, value: Number(tax.value), currency: tax.currency || '', jurisdiction: tax.jurisdiction || '', effectiveStart: tax.effectiveStart?.toISOString() || null, effectiveEnd: tax.effectiveEnd?.toISOString() || null, description: tax.description || '', revision: tax.updatedAt?.toISOString() || tax.createdAt?.toISOString() || '' })) };
+async function productOptions(bid, products) {
+  if (!products.length) return [];
+  const prices = await Pricing.find({ businessId: bid, productId: { $in: products.map(product => product._id) } }).lean();
+  const priceByProduct = new Map(prices.map(price => [String(price.productId), price]));
+  return products.map(product => { const price = priceByProduct.get(String(product._id)); return { id: String(product._id), name: product.name, code: product.code || '', description: product.description || '', serviceMeasurement: isServiceType(product.type) ? product.serviceMeasurement || 'date_time' : null, legacyVariantKey: productUnits.legacyVariantKey(product), variations: productUnits.variations(product).map(variant => { const [baseUnit, ...additionalUnits] = productUnits.options(product, variant.key); return { key: variant.key, values: variant.values, baseUnit: baseUnit || null, additionalUnits, unitConfigRevision: productUnits.revision(product, variant.key) }; }), taxMode: product.taxMode, taxComponentIds: (product.taxComponentIds || []).map(String), price: price ? { defaultSellingPrice: price.defaultSellingPrice?.toString() || null, purchaseCost: price.purchaseCost?.toString() || null, variantPrices: (price.variantPrices || []).map(item => ({ variantKey: item.variantKey, basis: item.basis, sellingPrice: item.sellingPrice?.toString() ?? null, purchaseCost: item.purchaseCost?.toString() ?? null })), rules: (price.rules || []).map(r => ({ id: String(r._id), customerUserId: r.customerUserId ? String(r.customerUserId) : null, minimumQuantity: r.minimumQuantity, sellingPrice: r.sellingPrice.toString(), active: r.active })), version: price.version } : null }; });
+}
+
+async function searchProducts(bid, uid, query) {
+  await authorize(bid, uid, 'business.orders.view');
+  if (typeof query !== 'string' || query.length > 160) throw fail(400, 'INVALID_PRODUCT_SEARCH', 'Enter a product name or barcode.');
+  const text = query.trim();
+  if (!text) return [];
+  const match = new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  const barcode = new RegExp('^' + match.source + '$', 'i');
+  const products = await Product.find({
+    businessId: bid,
+    $or: [
+      { name: match }, { title: match },
+      { barcode }, { gtin: barcode }, { 'variations.barcode': barcode }, { 'variations.gtin': barcode },
+      { 'variants.barcode': barcode }, { 'variants.gtin': barcode },
+    ],
+  }).sort({ normalizedName: 1, _id: 1 }).limit(20).lean();
+  const options = await productOptions(bid, products);
+  return options.map((option, index) => ({
+    ...option,
+    matchedVariantKey: productUnits.variations(products[index]).find(variant =>
+      barcode.test(variant.barcode || '') || barcode.test(variant.gtin || ''))?.key,
+  }));
+}
+
+async function getOptions(bid, uid, permission = 'business.orders.view', includeProducts = true) {
+  const { business } = await authorize(bid, uid, permission);
+  const [products, taxes] = await Promise.all([
+    includeProducts ? Product.find({ businessId: bid }).lean() : [],
+    Tax.find({ businessId: bid }).lean(),
+  ]);
+  return { currencyCode: businessCurrency(business), timeZone: business?.timeZone || 'Asia/Kolkata', products: await productOptions(bid, products), taxes: taxes.map(tax => ({ id: String(tax._id), name: tax.name, calculationType: tax.calculationType, value: Number(tax.value), currency: tax.currency || '', jurisdiction: tax.jurisdiction || '', effectiveStart: tax.effectiveStart?.toISOString() || null, effectiveEnd: tax.effectiveEnd?.toISOString() || null, description: tax.description || '', revision: tax.updatedAt?.toISOString() || tax.createdAt?.toISOString() || '' })) };
 }
 async function lookupContact(bid, uid, query, permission = 'business.orders.create') {
   await authorize(bid, uid, permission); const phone = normalizeContactPhone(query.countryCallingCode, query.phoneNumber); if (!phone) throw fail(400, 'INVALID_PHONE', 'Enter a valid phone number.');
@@ -449,11 +520,11 @@ async function storeImage(bid, uid, order, bytes, filename) {
   return { id: String(metadata._id), filename: metadata.filename, contentType: metadata.contentType, size: metadata.size, width: metadata.width, height: metadata.height };
 }
 async function createImageOrder(bid, uid, body, bytes, filename, idempotencyKey) {
-  await authorize(bid, uid, 'business.orders.create');
+  const { business } = await authorize(bid, uid, 'business.orders.create');
   if (body.acknowledgedNoStoreChange !== true) throw fail(400, 'IMAGE_ACK_REQUIRED', 'Confirm that the image will not change the store.');
   const type = body.orderType; if (!['sales', 'purchase'].includes(type)) throw fail(400, 'INVALID_ORDER_TYPE', 'Choose Sales Order or Purchase Order.');
   const documentDate = validTimestamp(body.documentDate, 'order'); const createdAtClient = validTimestamp(body.createdAtClient, 'creation');
-  const currencyCode = String(body.currencyCode || '').trim().toUpperCase();
+  const currencyCode = businessCurrency(business);
   if (!/^[A-Z]{3}$/.test(currencyCode)) throw fail(409, 'CURRENCY_NOT_CONFIGURED', 'Choose a valid three-letter order currency before saving this order.');
   const taxable = micro(body.imageAmounts?.taxableAmount, 'taxable amount'); const tax = micro(body.imageAmounts?.taxAmount ?? '0', 'tax amount');
   const taxableText = moneyText(taxable); const taxText = moneyText(tax); const totalText = moneyText(taxable + tax);
@@ -530,4 +601,4 @@ async function abortImageOrder(bid, uid, orderId) {
   return { removed: true };
 }
 
-module.exports = { listOrders, listLeads, summary, getOrder: (b,u,id) => get(BusinessOrder,b,u,id,'business.orders.view'), getLead: (b,u,id) => get(BusinessLead,b,u,id,'business.leads.view',true), createOrder, createLead, updateOrder, updateLead, deleteOrder: (b,u,id) => softDelete(BusinessOrder,b,u,id), deleteLead: (b,u,id) => softDelete(BusinessLead,b,u,id,true), convertLead, transitionOrder, getOptions, lookupContact, addTax, createImageOrder, attachImage, imageStreamInfo, removeImage, abortImageOrder };
+module.exports = { listOrders, listLeads, summary, getOrder: (b,u,id) => get(BusinessOrder,b,u,id,'business.orders.view'), getLead: (b,u,id) => get(BusinessLead,b,u,id,'business.leads.view',true), createOrder, createLead, updateOrder, updateLead, deleteOrder: (b,u,id) => softDelete(BusinessOrder,b,u,id), deleteLead: (b,u,id) => softDelete(BusinessLead,b,u,id,true), convertLead, transitionOrder, getOptions, searchProducts, lookupContact, addTax, createImageOrder, attachImage, imageStreamInfo, removeImage, abortImageOrder };

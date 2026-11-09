@@ -1,6 +1,25 @@
 'use strict';
+
 const mongoose = require('mongoose');
-const schema = new mongoose.Schema({ businessId: { type: mongoose.Schema.Types.ObjectId, ref: 'Business', required: true, index: true }, sourceProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'CatalogProduct', default: null, index: true }, name: { type: String, required: true, trim: true, maxlength: 160 }, normalizedName: { type: String, required: true, trim: true, lowercase: true, index: true }, gtin: { type: String, trim: true, maxlength: 14, default: '' }, normalizedGtin: { type: String, trim: true, maxlength: 14, default: '' }, brand: { type: String, trim: true, maxlength: 120, default: '' }, code: { type: String, trim: true, maxlength: 40, default: '' }, normalizedCode: { type: String, trim: true, uppercase: true, maxlength: 40, default: '' }, type: { type: String, required: true, trim: true, maxlength: 50 }, description: { type: String, trim: true, maxlength: 1000, default: '' }, categoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'BusinessCatalogCategory' }], baseUnitId: { type: mongoose.Schema.Types.ObjectId, ref: 'BusinessCatalogUnit', default: null }, additionalUnits: [{ unitId: { type: mongoose.Schema.Types.ObjectId, ref: 'BusinessCatalogUnit', required: true }, conversionFactor: { type: Number, required: true, min: Number.MIN_VALUE } }], reorderLevel: { type: mongoose.Schema.Types.Decimal128, default: null }, attributeIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'BusinessCatalogAttribute' }], pendingAttributes: [{ id: { type: String, trim: true, maxlength: 160 }, groupId: { type: String, trim: true, maxlength: 160 }, groupName: { type: String, trim: true, maxlength: 160 }, name: { type: String, trim: true, maxlength: 160 }, value: { type: String, trim: true, maxlength: 500 }, status: { type: String, trim: true, maxlength: 40 }, match: { type: String, trim: true, maxlength: 40 }, description: { type: String, trim: true, maxlength: 500 } }], taxMode: { type: String, enum: ['inherit', 'specific'], default: 'inherit' }, taxComponentIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'BusinessCatalogTax' }], needsUnit: { type: Boolean, default: false } }, { timestamps: true });
+const { productFields, legacyProductFields, legacyUnitReferences, validateLegacyUnits } = require('./productFields');
+const { ObjectId, Decimal128 } = mongoose.Schema.Types;
+
+const schema = new mongoose.Schema({
+  businessId: { type: ObjectId, ref: 'Business', required: true, index: true },
+  ...productFields,
+  sourceProductId: { type: ObjectId, ref: 'CatalogProduct', default: null, index: true },
+  mrpPricingPending: { type: Boolean, select: false },
+  code: { type: String, trim: true, maxlength: 40, default: '' },
+  normalizedCode: { type: String, trim: true, uppercase: true, maxlength: 40, default: '' },
+  categoryIds: [{ type: ObjectId, ref: 'BusinessCatalogCategory' }],
+  attributeIds: [{ type: ObjectId, ref: 'BusinessCatalogAttribute' }],
+  taxComponentIds: [{ type: ObjectId, ref: 'BusinessCatalogTax' }],
+  ...legacyProductFields,
+  ...legacyUnitReferences('BusinessCatalogUnit'),
+  reorderLevel: Decimal128,
+}, { timestamps: true });
+
+validateLegacyUnits(schema);
 schema.index({ businessId: 1, normalizedCode: 1 }, { unique: true, partialFilterExpression: { normalizedCode: { $type: 'string', $gt: '' } } });
-schema.index({ businessId: 1, normalizedGtin: 1 }, { unique: true, partialFilterExpression: { normalizedGtin: { $type: 'string', $gt: '' } } });
+schema.index({ businessId: 1, variantIdentifierKeys: 1 }, { unique: true, partialFilterExpression: { variantIdentifierKeys: { $type: 'string' } } });
 module.exports = mongoose.models.BusinessCatalogProduct || mongoose.model('BusinessCatalogProduct', schema);

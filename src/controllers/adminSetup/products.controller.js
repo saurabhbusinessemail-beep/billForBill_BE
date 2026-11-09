@@ -14,7 +14,11 @@ function fileInfo(req) {
 module.exports = {
   list: async (req, res) => res.status(200).json({ success: true, data: await service.list(req.query) }),
   get: async (req, res) => res.status(200).json({ success: true, data: await service.get(req.params.id) }),
-  create: async (req, res) => { const file = fileInfo(req); res.status(201).json({ success: true, data: await service.createWithImage(metadata(req), file.type, file.name, file.bytes) }); },
+  create: async (req, res) => {
+    if (req.is('application/json')) return res.status(201).json({ success: true, data: await common.create('products', req.body) });
+    const file = fileInfo(req);
+    return res.status(201).json({ success: true, data: await service.createWithImage(metadata(req), file.type, file.name, file.bytes) });
+  },
   update: async (req, res) => {
     const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
     if (type === 'application/json') return res.status(200).json({ success: true, data: await service.updateDetails(req.params.id, req.body) });

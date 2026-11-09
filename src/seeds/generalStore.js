@@ -12,6 +12,7 @@ const Attribute = require('../DB/models/ProductAttribute');
 const Unit = require('../DB/models/CatalogUnit');
 const Tax = require('../DB/models/TaxComponent');
 const ProductImage = require('../DB/models/ProductImage');
+const productUnits = require('../services/productUnits');
 const { validateImage } = require('../services/adminSetup/productImages.service');
 
 const REQUIREMENT = path.resolve(__dirname, '../../../docs/requirements/F008_BUSINESS_TYPE.md');
@@ -142,8 +143,12 @@ async function seed() {
   }
 
   const unitMap = new Map();
+  const attributeRows = tableRows(section('Seed attributes')).filter(row => row[0] !== 'Attribute' && !row[0].startsWith('Note:'));
+  const genericSymbols = new Set(attributeRows.flatMap(row => row[1] === '—' ? [] : row[1].split(',').map(s => s.trim())));
+  const aliases = { pc: 'piece', doz: 'dozen' };
   for (const row of tableRows(section('Seed units')).filter(row => row[0] !== 'Unit')) {
-    const unit = await upsertNamed(Unit, row[0], { symbol: row[1], dimension: row[2].toLowerCase() });
+    const values = { name: row[0], symbol: row[1], dimension: row[2].toLowerCase() };
+    const unit = genericSymbols.has(row[1]) || genericSymbols.has(aliases[row[1]]) ? await upsertNamed(Unit, row[0], values) : { ...values, _id: row[1] };
     unitMap.set(row[1], unit);
   }
   if (unitMap.has('pc')) unitMap.set('piece', unitMap.get('pc'));
@@ -174,15 +179,19 @@ async function seed() {
     const categoryIds = category ? [category._id] : [];
     const addition = entry.additional === '—' ? [] : entry.additional.split(',').map((part) => {
       const symbol = part.trim().split(/\s+/)[0]; const unit = unitMap.get(symbol);
-      const factor = Number.parseFloat(part.match(/\((\d+)/)?.[1] || '1');
+      const baseMetric = productUnits.metric(baseUnit.symbol); const alternateMetric = productUnits.metric(symbol);
+      if (!baseMetric || !alternateMetric || baseMetric[1] !== alternateMetric[1]) throw new Error('Unsupported explicit seed conversion for ' + entry.name);
+      if (alternateMetric[2] * 100000000n % baseMetric[2]) { console.log('[seed] Skipped nonrepresentable alternate ' + symbol + ' for ' + entry.name + '; base unit is unchanged.'); return null; }
+      const factor = productUnits.text(alternateMetric[2] * 100000000n / baseMetric[2]);
       if (!unit) throw new Error(`Missing additional unit ${symbol} for ${entry.name}`);
       return { unitId: unit._id, conversionFactor: factor };
-    });
+    }).filter(Boolean);
     const attributeIds = entry.attributes === '—' ? [] : entry.attributes.split(',').map(name => attributeMap.get(name.trim())?._id).filter(Boolean);
     const specificTax = entry.taxText.match(/Specific:\s*([^;]+)/i)?.[1]?.trim();
     const typeMatch = entry.taxText.match(/Product type\s+\*\*([^*]+)\*\*/i);
-    const type = typeMatch?.[1] || 'Physical';
-    const fields = { type, categoryIds, baseUnitId: baseUnit._id, additionalUnits: addition, attributeIds, taxMode: specificTax ? 'specific' : 'inherit', taxComponentIds: specificTax && taxMap.has(specificTax) ? [taxMap.get(specificTax)._id] : [], needsUnit: false };
+    const type = /^services?$/i.test(typeMatch?.[1]?.trim() || '') ? 'Services' : 'Goods';
+    const config = productUnits.normalize({ baseUnit: { key: 'base', name: baseUnit.name, symbol: baseUnit.symbol, dimension: baseUnit.dimension, factorToBase: '1', active: true, source: 'manual' }, units: addition.map((a, i) => { const unit = [...unitMap.values()].find(u => String(u._id) === String(a.unitId)); return { key: 'unit_' + i, name: unit.name, symbol: unit.symbol, dimension: unit.dimension, factorToBase: String(a.conversionFactor), conversionKind: 'product_specific', active: true, source: 'manual' }; }), quantityVariants: [] });
+    const fields = { type, categoryIds, title: entry.name, variations: [productUnits.storeVariation({ key: 'default', values: {}, ...config })], legacyStockVariantKey: 'default', attributeIds, taxMode: specificTax ? 'specific' : 'inherit', taxComponentIds: specificTax && taxMap.has(specificTax) ? [taxMap.get(specificTax)._id] : [] };
     let product = await Product.findOne({ normalizedName: norm(entry.name), categoryIds: { $all: categoryIds, $size: categoryIds.length } });
     if (!product) product = await Product.create({ name: entry.name, normalizedName: norm(entry.name), ...fields });
     const sourceUrl = images.get(entry.name);
@@ -198,7 +207,7 @@ async function seed() {
   businessType.productIds = [...new Set([...(businessType.productIds || []).map(String), ...products.map(String)])];
   businessType.taxComponentIds = [...new Set([...(businessType.taxComponentIds || []).map(String), ...[...taxMap.values()].map(tax => String(tax._id))])];
   await businessType.save();
-  const unitCount = new Set([...unitMap.values()].map(unit => String(unit._id))).size;
+  const unitCount = new Set([...unitMap.values()].filter(unit => mongoose.isValidObjectId(unit._id)).map(unit => String(unit._id))).size;
   console.log(`Seeded General Store: ${categoryMap.size} categories, ${unitCount} units, ${attributeMap.size} attributes, ${taxMap.size} tax components, ${products.length} products and ${products.length} product images (${fallbackProducts} using the default image; type ${businessType._id}).`);
 }
 

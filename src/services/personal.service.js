@@ -99,7 +99,7 @@ function parseQuery(query) {
   return { page: pageRaw, pageSize: Math.min(pageSizeLimit, pageSizeRaw), from, to, paymentStatus, deliveryStatus, method, summary, businessId, search: String(query.search || '').trim().slice(0, 100) };
 }
 async function customerBills(userId) {
-  return Bill.find({ partyUserId: userId, billType: 'sale', status: { $in: ['issued', 'cancelled'] }, billNumber: { $type: 'string' }, issuedAt: { $ne: null }, deletedAt: null }).sort({ billDate: -1, _id: -1 }).lean();
+  return Bill.find({ partyUserId: userId, billType: 'sale', gstin: { $in: [null, ''] }, status: { $in: ['issued', 'cancelled'] }, billNumber: { $type: 'string' }, issuedAt: { $ne: null }, deletedAt: null }).sort({ billDate: -1, _id: -1 }).lean();
 }
 async function dashboard(userId, rawQuery = {}) {
   assertDatabaseConnected();
@@ -167,19 +167,24 @@ async function dashboard(userId, rawQuery = {}) {
 async function authorizedBill(userId, billId) {
   assertDatabaseConnected();
   if (!idOk(billId)) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.');
-  const bill = await Bill.findOne({ _id: billId, partyUserId: userId, billType: 'sale', status: { $in: ['issued', 'cancelled'] }, billNumber: { $type: 'string' }, issuedAt: { $ne: null }, deletedAt: null }).lean();
+  const bill = await Bill.findOne({ _id: billId, partyUserId: userId, billType: 'sale', gstin: { $in: [null, ''] }, status: { $in: ['issued', 'cancelled'] }, billNumber: { $type: 'string' }, issuedAt: { $ne: null }, deletedAt: null }).lean();
   if (!bill) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.');
   return bill;
 }
 async function bill(userId, billId) {
   const row = await authorizedBill(userId, billId);
+  return readBillDetails(row, `/personal/bills/${row._id}/files`);
+}
+async function readBillDetails(row, fileBase, fileIds) {
+  const fileFilter = { businessId: row.businessId, billId: row._id, deletedAt: null };
+  if (fileIds) fileFilter._id = { $in: fileIds };
   const [allocations, business, files, delivery] = await Promise.all([
     activeAllocations([row._id]), Business.findById(row.businessId).select('legalName phone address').lean(),
-    BillImage.find({ businessId: row.businessId, billId: row._id, deletedAt: null }).select('-fileId').sort({ createdAt: 1 }).lean(),
+    BillImage.find(fileFilter).select('-fileId').sort({ createdAt: 1 }).lean(),
     BusinessDelivery.findOne({ businessId: row.businessId, billId: row._id }).sort({ createdAt: -1 }).lean(),
   ]);
-  const view = safeBill(row, allocations, business, true, delivery);
-  view.files = files.map(file => ({ id: String(file._id), filename: file.filename, contentType: file.contentType, size: file.size, url: `/personal/bills/${row._id}/files/${file._id}` }));
+  const view = safeBill(row, allocations, business || { _id: row.businessId, legalName: '' }, true, delivery);
+  view.files = files.map(file => ({ id: String(file._id), filename: file.filename, contentType: file.contentType, size: file.size, url: `${fileBase}/${file._id}` }));
   return view;
 }
 async function billFile(userId, billId, fileId) {
@@ -190,4 +195,4 @@ async function billFile(userId, billId, fileId) {
   const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'businessBillImages' });
   return { image, stream: bucket.openDownloadStream(image.fileId) };
 }
-module.exports = { dashboard, bill, billFile };
+module.exports = { dashboard, bill, billFile, readBillDetails };

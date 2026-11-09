@@ -13,6 +13,8 @@ const billSchema = new Schema({
   billDate: { type: String, required: true },
   dueDate: { type: String, required: true },
   partyUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+  gstin: { type: String, trim: true, uppercase: true, maxlength: 15, default: '' },
+  recipientBusinessId: { type: Schema.Types.ObjectId, ref: 'Business', default: null },
   partySnapshot: { type: Schema.Types.Mixed, required: true },
   orderId: { type: Schema.Types.ObjectId, ref: 'BusinessOrder', default: null },
   leadId: { type: Schema.Types.ObjectId, ref: 'BusinessLead', default: null },
@@ -51,6 +53,8 @@ billSchema.index({ businessId: 1, orderId: 1 }, { unique: true, partialFilterExp
 billSchema.index({ businessId: 1, idempotencyKey: 1 }, { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } });
 billSchema.index({ businessId: 1, partyUserId: 1, dueDate: 1 });
 billSchema.index({ partyUserId: 1, billType: 1, status: 1, billDate: -1, _id: -1 });
+billSchema.index({ recipientBusinessId: 1, billDate: -1, _id: -1 }, { partialFilterExpression: { recipientBusinessId: { $type: 'objectId' } } });
+billSchema.index({ gstin: 1, recipientBusinessId: 1 }, { partialFilterExpression: { gstin: { $gt: '' } } });
 billSchema.pre('validate', function validateIssuedPlanId() {
   if (this.status === 'issued' && !this.planId && (this.isNew || this.isModified('status'))) this.invalidate('planId', 'Issued bills must reference a plan or extra-credit entitlement.', 'PLAN_ID_REQUIRED');
 });

@@ -1,0 +1,12 @@
+'use strict';
+const express = require('express');
+const { requireSession } = require('../middleware/requireSession');
+const { requireSuperAdmin } = require('../middleware/requireSuperAdmin');
+const controller = require('../controllers/dataCleanup.controller');
+const router = express.Router();
+router.use(requireSession, requireSuperAdmin);
+router.get('/businesses', controller.businesses);
+router.delete('/admin-catalog', controller.adminCatalog);
+router.delete('/businesses/:businessId/data', controller.businessData);
+router.delete('/all-data', controller.allData);
+module.exports = router;

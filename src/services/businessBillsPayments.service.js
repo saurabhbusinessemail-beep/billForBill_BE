@@ -1,6 +1,8 @@
 'use strict';
 const mongoose = require('mongoose');
 const crypto = require('node:crypto');
+const { normalizeGstin } = require('../utils/gstin');
+const { readBillDetails } = require('./personal.service');
 const { access } = require('./businessPeopleTeams.service');
 const Business = require('../DB/models/Business');
 const User = require('../DB/models/User');
@@ -100,6 +102,7 @@ async function createDraft(bid, uid, body = {}, key) {
   if (!['sale', 'purchase'].includes(body.billType) || !['detailed', 'image'].includes(body.entryMode)) throw fail(400, 'INVALID_BILL', 'Choose a bill type and entry mode.');
   if (typeof key !== 'string' || !/^[A-Za-z0-9-]{16,120}$/.test(key)) throw fail(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Retry creating this bill from the form.');
   const existing = await Bill.findOne({ businessId: bid, idempotencyKey: key }).lean(); if (existing) return billView(existing);
+  const gstin = normalizeGstin(body.gstin);
   const billDate = date(body.billDate, 'bill date'); const dueDate = date(body.dueDate, 'due date'); if (dueDate < billDate) throw fail(400, 'INVALID_DUE_DATE', 'Due date cannot be before bill date.');
   const type = body.billType === 'sale' ? 'customer' : 'supplier'; const partyResult = await party(bid, body.partyUserId, type, body.newParty);
   let order = null; let leadId = null; let lines = []; let amounts; let subtotal;
@@ -137,7 +140,7 @@ async function createDraft(bid, uid, body = {}, key) {
   const business = await Business.findById(bid).select('ownerUserId').lean(); const owner = await User.findById(business.ownerUserId).select('displayName phoneE164').lean();
   const snapshot = body.partySnapshot && typeof body.partySnapshot === 'object' ? { ...partyResult.snapshot, address: String(body.partySnapshot.address || '').slice(0, 1000) } : partyResult.snapshot;
   try {
-    const created = await Bill.create({ businessId: bid, billType: body.billType, entryMode: body.entryMode, status: 'draft', deliveryStatus: 'draft', billDate, dueDate, partyUserId: partyResult.id, partySnapshot: { ...snapshot, businessOwnerUserId: String(owner?._id || business.ownerUserId) }, orderId: order?._id || null, leadId, currencyCode, currencyScale: order?.currencyScale ?? 2, lines, discounts: body.entryMode === 'detailed' ? (order?.discounts || []) : [], afterDiscount: body.entryMode === 'detailed' ? decimal(String(order?.afterDiscount || amounts.subtotal)) : null, taxes: body.entryMode === 'detailed' ? (order?.taxes || []) : [], imageAmounts: body.entryMode === 'image' ? { taxableAmount: amounts.subtotal, taxAmount: amounts.taxTotal, taxDescription: String(body.imageAmounts?.taxDescription || '').slice(0, 120) } : null, subtotal: decimal(amounts.subtotal), discountTotal: decimal(amounts.discountTotal), taxTotal: decimal(amounts.taxTotal), grandTotal: decimal(amounts.grandTotal), deliveredAtIssue: Boolean(body.deliveredAtIssue), imageIds: [], imageMetadata: [], version: 1, idempotencyKey: key, createdByUserId: uid, updatedByUserId: uid, lifecycleEvents: [{ action: 'draft_created', actorUserId: uid, at: new Date() }] });
+    const created = await Bill.create({ businessId: bid, billType: body.billType, entryMode: body.entryMode, status: 'draft', deliveryStatus: 'draft', billDate, dueDate, gstin, partyUserId: partyResult.id, partySnapshot: { ...snapshot, businessOwnerUserId: String(owner?._id || business.ownerUserId) }, orderId: order?._id || null, leadId, currencyCode, currencyScale: order?.currencyScale ?? 2, lines, discounts: body.entryMode === 'detailed' ? (order?.discounts || []) : [], afterDiscount: body.entryMode === 'detailed' ? decimal(String(order?.afterDiscount || amounts.subtotal)) : null, taxes: body.entryMode === 'detailed' ? (order?.taxes || []) : [], imageAmounts: body.entryMode === 'image' ? { taxableAmount: amounts.subtotal, taxAmount: amounts.taxTotal, taxDescription: String(body.imageAmounts?.taxDescription || '').slice(0, 120) } : null, subtotal: decimal(amounts.subtotal), discountTotal: decimal(amounts.discountTotal), taxTotal: decimal(amounts.taxTotal), grandTotal: decimal(amounts.grandTotal), deliveredAtIssue: Boolean(body.deliveredAtIssue), imageIds: [], imageMetadata: [], version: 1, idempotencyKey: key, createdByUserId: uid, updatedByUserId: uid, lifecycleEvents: [{ action: 'draft_created', actorUserId: uid, at: new Date() }] });
     if (order) { await Order.updateOne({ _id: order._id, businessId: bid }, { $set: { billStatus: 'draft', billGeneratedAt: null } }); if (leadId) await Lead.updateOne({ _id: leadId, businessId: bid }, { $set: { billStatus: 'draft', billGeneratedAt: null } }); }
     return billView(created.toObject());
   } catch (error) { if (partyResult.created) { const [hasBill, hasOrder, hasLead] = await Promise.all([Bill.exists({ partyUserId: partyResult.id }), Order.exists({ contactUserId: partyResult.id }), Lead.exists({ contactUserId: partyResult.id })]); if (!hasBill && !hasOrder && !hasLead) await User.deleteOne({ _id: partyResult.id, accountStatus: 'provisioned' }).catch(() => undefined); } if (error.code === 11000) { const prior = await Bill.findOne({ businessId: bid, idempotencyKey: key }).lean(); if (prior) return billView(prior); } throw error; }
@@ -146,6 +149,10 @@ async function updateDraft(bid, uid, billId, body = {}) {
   const ctx = await auth(bid, uid);
   if (!ctx.owner && !ctx.keys.has('business.bills.edit')) throw fail(403, 'PERMISSION_DENIED', 'You do not have permission to edit draft bills.');
   if (!idOk(billId)) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.');
+  return withFinancialLock(bid, () => updateDraftUnlocked(bid, uid, billId, body));
+}
+
+async function updateDraftUnlocked(bid, uid, billId, body) {
   const bill = await Bill.findOne({ _id: billId, businessId: bid, deletedAt: null });
   if (!bill) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.');
   if (bill.status !== 'draft') throw fail(409, 'BILL_NOT_EDITABLE', 'Only draft bills can be edited.');
@@ -153,6 +160,7 @@ async function updateDraft(bid, uid, billId, body = {}) {
   const billDate = date(body.billDate, 'bill date'); const dueDate = date(body.dueDate, 'due date');
   if (dueDate < billDate) throw fail(400, 'INVALID_DUE_DATE', 'Due date cannot be before bill date.');
   const changes = { billDate, dueDate, deliveredAtIssue: Boolean(body.deliveredAtIssue), updatedByUserId: uid };
+  if (Object.hasOwn(body, 'gstin')) changes.gstin = normalizeGstin(body.gstin);
   let nextTotal = money(String(bill.grandTotal));
   if (bill.entryMode === 'image' && body.imageAmounts) {
     const taxable = money(body.imageAmounts.taxableAmount ?? body.imageAmounts.subtotal, 'taxable amount', true);
@@ -251,12 +259,15 @@ async function issueUnlocked(bid, uid, billId) {
     }
   }
   if (bill.entryMode === 'image' && !bill.imageIds.length) throw fail(400, 'BILL_FILE_REQUIRED', 'Upload at least one bill image or PDF before issuing.');
+  const recipient = bill.billType === 'sale' && bill.gstin ? await matchingBusiness(bill.gstin) : null;
+  bill.recipientBusinessId = recipient && String(recipient) !== String(bid) ? recipient : null;
   bill.planId = await require('./businessPlans.service').issueEntitlement(bid, uid);
   const sequence = await nextNumber(BillCounter, bid, bill.billType); const numberConfig = await NumberConfig.findOne({ businessId: bid }).lean(); const prefix = bill.billType === 'sale' ? (numberConfig?.billSalesPrefix || 'SB') : (numberConfig?.billPurchasePrefix || 'PB'); const at = new Date();
   bill.billNumber = `${prefix}-${sequence}`; bill.sequenceNumber = sequence; bill.status = 'issued'; bill.deliveryStatus = bill.deliveredAtIssue ? (bill.billType === 'sale' ? 'delivered' : 'received') : 'in_transit'; bill.issuedAt = at; bill.issuedByUserId = uid; bill.version += 1; bill.updatedByUserId = uid; bill.lifecycleEvents.push({ action: 'issued', actorUserId: uid, at }); await bill.save();
   if (bill.deliveryStatus === 'delivered' || bill.deliveryStatus === 'received') {
     try { await postBillInventory(bill.toObject(), uid, 'delivered_at_issue'); }
     catch (error) {
+      bill.recipientBusinessId = null;
       bill.status = 'draft'; bill.deliveryStatus = 'draft'; bill.planId = null; bill.billNumber = null; bill.sequenceNumber = null; bill.issuedAt = null; bill.issuedByUserId = null; bill.version += 1; bill.updatedByUserId = uid;
       if (bill.lifecycleEvents.at(-1)?.action === 'issued') bill.lifecycleEvents.pop();
       await bill.save();
@@ -419,8 +430,14 @@ async function uploadFile(bid, uid, billId, bytes, filename) {
 }
 async function billFileStream(bid, uid, billId, fileId) {
   await auth(bid, uid, 'business.bills.view'); if (!idOk(billId) || !idOk(fileId)) throw fail(404, 'BILL_FILE_NOT_FOUND', 'Bill file not found.');
-  const [bill, image] = await Promise.all([Bill.findOne({ _id: billId, businessId: bid, deletedAt: null }).select('_id imageIds').lean(), BillImage.findOne({ _id: fileId, businessId: bid, billId, deletedAt: null }).lean()]);
-  if (!bill || !image || !bill.imageIds.some(x => String(x) === String(fileId))) throw fail(404, 'BILL_FILE_NOT_FOUND', 'Bill file not found.');
+  const bill = await Bill.findOne({ _id: billId, businessId: bid, deletedAt: null }).select('businessId imageIds').lean();
+  return streamBillFile(bill, billId, fileId);
+}
+async function streamBillFile(bill, billId, fileId) {
+  if (!bill?.imageIds?.some(id => String(id) === String(fileId))) throw fail(404, 'BILL_FILE_NOT_FOUND', 'Bill file not found.');
+  const bid = bill.businessId;
+  const image = await BillImage.findOne({ _id: fileId, businessId: bid, billId, deletedAt: null }).lean();
+  if (!image) throw fail(404, 'BILL_FILE_NOT_FOUND', 'Bill file not found.');
   const bucket = billBucket(); let storedFileId = image.fileId;
   const files = mongoose.connection.db.collection('businessBillImages.files');
   const storedFile = await files.findOne({ _id: storedFileId }, { projection: { _id: 1 } });
@@ -436,6 +453,52 @@ async function billFileStream(bid, uid, billId, fileId) {
     await BillImage.updateOne({ _id: image._id }, { $set: { fileId: storedFileId } });
   }
   return { image, stream: bucket.openDownloadStream(storedFileId) };
+}
+
+async function matchingBusiness(gstin) {
+  const businesses = await Business.find({ gstin, catalogCopyState: { $ne: 'pending' } }).select('_id').limit(2).lean();
+  return businesses.length === 1 ? businesses[0]._id : null;
+}
+
+const receivedSale = { billType: 'sale', status: { $in: ['issued', 'cancelled'] }, issuedAt: { $ne: null }, deletedAt: null };
+
+function incomingSummary(bill) {
+  return {
+    id: String(bill._id), billNumber: bill.billNumber, billDate: bill.billDate,
+    supplierName: bill.businessId?.legalName || '', currencyCode: bill.currencyCode,
+    grandTotal: String(bill.grandTotal), status: bill.status,
+  };
+}
+
+async function listIncomingBills(bid, uid, query = {}) {
+  const { business } = await auth(bid, uid, 'business.bills.view');
+  if (business.gstin && String(await matchingBusiness(business.gstin)) === String(bid)) {
+    await Bill.updateMany({
+      ...receivedSale, businessId: { $ne: bid }, recipientBusinessId: null, gstin: business.gstin,
+    }, { $set: { recipientBusinessId: bid } }, { timestamps: false });
+  }
+  const page = Math.max(1, Math.min(100000, parseInt(query.page, 10) || 1));
+  const pageSize = 20;
+  const bills = await Bill.find({ ...receivedSale, recipientBusinessId: bid })
+    .select('businessId billNumber billDate currencyCode grandTotal status')
+    .populate('businessId', 'legalName').sort({ billDate: -1, _id: -1 }).skip((page - 1) * pageSize).limit(pageSize + 1).lean();
+  return { items: bills.slice(0, pageSize).map(incomingSummary), hasNextPage: bills.length > pageSize };
+}
+
+async function getIncomingBill(bid, uid, billId) {
+  await auth(bid, uid, 'business.bills.view');
+  if (!idOk(billId)) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.');
+  const bill = await Bill.findOne({ ...receivedSale, recipientBusinessId: bid, _id: billId }).lean();
+  if (!bill) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.');
+  const details = await readBillDetails(bill, `/businesses/${bid}/incoming-bills/${billId}/files`, bill.imageIds || []);
+  return { ...details, gstin: bill.gstin };
+}
+
+async function incomingBillFile(bid, uid, billId, fileId) {
+  await auth(bid, uid, 'business.bills.view');
+  if (!idOk(billId) || !idOk(fileId)) throw fail(404, 'BILL_FILE_NOT_FOUND', 'Bill file not found.');
+  const bill = await Bill.findOne({ ...receivedSale, recipientBusinessId: bid, _id: billId }).select('businessId imageIds').lean();
+  return streamBillFile(bill, billId, fileId);
 }
 async function paymentDetails(bid, uid) { const ctx = await auth(bid, uid); if (!ctx.keys.has('business.payments.view') && !ctx.keys.has('business.payments.create') && !ctx.keys.has('business.paymentMethods.manage')) throw fail(403, 'PERMISSION_DENIED', 'You do not have permission to view payment settings.'); return (await MethodConfig.findOne({ businessId: bid }).lean())?.fields || { cash: { paidBy: 'optional' }, upi: { upiId: 'optional', transactionReference: 'optional' }, card: { lastFour: 'optional', approvalCode: 'optional' }, bank_transfer: { reference: 'optional', bankName: 'optional' } }; }
 const DEFAULT_NUMBER_CONFIG = { orderSalesPrefix: 'SO', orderPurchasePrefix: 'PO', billSalesPrefix: 'SB', billPurchasePrefix: 'PB', paymentPrefix: 'PAY', deliveryPrefix: 'DLV' };
@@ -550,4 +613,4 @@ async function paymentSummary(bid, uid) {
   return { received: moneyText(received), paid: moneyText(paid), incomingAdvance: moneyText(incomingAdvance), receivable: moneyText(receivable), payable: moneyText(payable), paymentCount: rows.length, currencyCode: bills[0]?.currencyCode || rows[0]?.currencyCode || '', authorization: { isOwner: ctx.owner, permissionKeys: [...ctx.keys] } };
 }
 async function getBill(bid, uid, billId) { await auth(bid, uid, 'business.bills.view'); if (!idOk(billId)) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.'); const bill = await Bill.findOne({ _id: billId, businessId: bid, deletedAt: null }).lean(); if (!bill) throw fail(404, 'BILL_NOT_FOUND', 'Bill not found.'); const paid = await balances(bid, [bill]); const [allocations, images, order] = await Promise.all([Allocation.find({ businessId: bid, billId }).populate('paymentId').sort({ createdAt: 1 }).lean(), BillImage.find({ businessId: bid, billId, deletedAt: null }).select('-fileId').sort({ createdAt: 1 }).lean(), bill.orderId ? Order.findOne({ _id: bill.orderId, businessId: bid }).select('orderNumber').lean() : null]); return { ...billView(bill, paid.get(String(bill._id)) || 0n), orderNumber: order?.orderNumber || '', files: images.map(x => ({ id: String(x._id), filename: x.filename, contentType: x.contentType, size: x.size, url: `/businesses/${bid}/bills/${billId}/files/${x._id}` })), allocations: allocations.map(a => ({ id: String(a._id), amount: String(a.amount), reversedAt: a.reversedAt, payment: a.paymentId ? { id: String(a.paymentId._id), paymentNumber: a.paymentId.paymentNumber, date: a.paymentId.paymentDate, method: a.paymentId.method } : null })) }; }
-module.exports = { listBills, summary, createDraft, updateDraft, issue, changeDelivery, recordDeliveryStarted, cancelBill, cancelOrder, deleteDraft, uploadFile, billFileStream, pendingBills, createPayment, listPayments, listPartyBalances, getPaymentRecord, reversePayment, paymentSummary, getBill, paymentDetails, lookupBillParty, savePaymentMethodConfig, documentNumberConfig, saveDocumentNumberConfig, transportConfig, saveTransportConfig, withFinancialLock };
+module.exports = { listBills, listIncomingBills, getIncomingBill, incomingBillFile, summary, createDraft, updateDraft, issue, changeDelivery, recordDeliveryStarted, cancelBill, cancelOrder, deleteDraft, uploadFile, billFileStream, pendingBills, createPayment, listPayments, listPartyBalances, getPaymentRecord, reversePayment, paymentSummary, getBill, paymentDetails, lookupBillParty, savePaymentMethodConfig, documentNumberConfig, saveDocumentNumberConfig, transportConfig, saveTransportConfig, withFinancialLock };

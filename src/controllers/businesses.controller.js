@@ -1,6 +1,6 @@
 'use strict';
 
-const { listBusinesses, getBusiness, createBusiness, updateBusiness } = require('../services/businesses.service');
+const { listBusinesses, getBusiness, createBusiness, updateBusiness, listBusinessTypeOptions } = require('../services/businesses.service');
 const catalog = require('../services/businessCatalog.service');
 
 async function getBusinesses(req, res) {
@@ -10,6 +10,11 @@ async function getBusinesses(req, res) {
 
 async function getOneBusiness(req, res) {
   const data = await getBusiness(req.authUserId, req.params.businessId);
+  res.status(200).json({ success: true, data });
+}
+
+async function getBusinessTypeOptions(_req, res) {
+  const data = await listBusinessTypeOptions();
   res.status(200).json({ success: true, data });
 }
 
@@ -28,4 +33,4 @@ async function getCatalogAuthorization(req, res) {
   res.status(200).json({ success: true, data });
 }
 
-module.exports = { getBusinesses, getOneBusiness, postBusiness, patchBusiness, getCatalogAuthorization };
+module.exports = { getBusinesses, getOneBusiness, getBusinessTypeOptions, postBusiness, patchBusiness, getCatalogAuthorization };

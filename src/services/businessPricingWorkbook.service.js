@@ -7,7 +7,7 @@ const pricing = require('./businessPricing.service');
 const catalog = require('./businessCatalog.service');
 const Product = require('../DB/models/BusinessCatalogProduct');
 const Category = require('../DB/models/BusinessCatalogCategory');
-const Unit = require('../DB/models/BusinessCatalogUnit');
+const productUnits = require('./productUnits');
 const User = require('../DB/models/User');
 const { parsePhoneE164 } = require('../utils/phone');
 const Price = require('../DB/models/BusinessProductPricing');
@@ -32,11 +32,11 @@ async function exportWorkbook(bid, uid, type, productIds = []) {
   const products = await Product.find(filter).sort({ normalizedName: 1 }).lean();
   const prices = await Price.find({ businessId: bid, productId: { $in: products.map(p => p._id) } }).lean(); const byId = new Map(prices.map(p => [String(p.productId), p]));
   const wb = workbookBase(type); const sheet = wb.addWorksheet('Products');
-  const unitIds = [...new Set(products.map(p => p.baseUnitId).filter(Boolean).map(String))]; const units = await Unit.find({ businessId: bid, _id: { $in: unitIds } }).select('_id name').lean(); const unitNames = new Map(units.map(unit => [String(unit._id), unit.name])); const businessCategories = await Category.find({ businessId: bid }).select('_id name parentId').lean(); const categoryById = new Map(businessCategories.map(category => [String(category._id), category])); const categoryNames = new Map(businessCategories.map(category => [String(category._id), categoryPath(category, categoryById)]));
+  const businessCategories = await Category.find({ businessId: bid }).select('_id name parentId').lean(); const categoryById = new Map(businessCategories.map(category => [String(category._id), category])); const categoryNames = new Map(businessCategories.map(category => [String(category._id), categoryPath(category, categoryById)]));
   const columns = type === 'selling' ? ['Product Key', 'Product ID', 'Product Name', 'Product Type', 'Description', 'Categories', 'Base Unit', 'Default Selling Price'] : ['Product Key', 'Product ID', 'Product Name', 'Product Type', 'Description', 'Categories', 'Base Unit', 'Purchase Cost', 'Tax Inclusive', 'Separate Tax'];
   setHeader(sheet, columns);
   for (const col of [3, 4, 5, 6, 7]) sheet.getRow(1).getCell(col).note = 'Read-only reference column. Edit pricing fields only.';
-  for (const product of products) { const p = byId.get(String(product._id)); const names = product.categoryIds.map(id => categoryNames.get(String(id))).filter(Boolean).join('; '); const row = type === 'selling' ? [String(product._id), String(product._id), product.name, product.type, product.description, names, unitNames.get(String(product.baseUnitId)) || '', p?.defaultSellingPrice?.toString() || ''] : [String(product._id), String(product._id), product.name, product.type, product.description, names, unitNames.get(String(product.baseUnitId)) || '', p?.purchaseCost?.toString() || '', p?.taxInclusive === false ? 'No' : 'Yes', p?.separateTaxAmount?.toString() || '']; const excelRow = sheet.addRow(row); for (const col of [1, 2, 3, 4, 5, 6, 7]) { const cell = excelRow.getCell(col); cell.protection = { locked: true }; if (col >= 3 && col <= 7) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } }; } for (const col of (type === 'selling' ? [8] : [8, 9, 10])) excelRow.getCell(col).protection = { locked: false }; }
+  for (const product of products) { const p = byId.get(String(product._id)); const names = product.categoryIds.map(id => categoryNames.get(String(id))).filter(Boolean).join('; '); const row = type === 'selling' ? [String(product._id), String(product._id), product.name, product.type, product.description, names, productUnits.dto(product).baseUnit?.name || '', p?.defaultSellingPrice?.toString() || ''] : [String(product._id), String(product._id), product.name, product.type, product.description, names, productUnits.dto(product).baseUnit?.name || '', p?.purchaseCost?.toString() || '', p?.taxInclusive === false ? 'No' : 'Yes', p?.separateTaxAmount?.toString() || '']; const excelRow = sheet.addRow(row); for (const col of [1, 2, 3, 4, 5, 6, 7]) { const cell = excelRow.getCell(col); cell.protection = { locked: true }; if (col >= 3 && col <= 7) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } }; } for (const col of (type === 'selling' ? [8] : [8, 9, 10])) excelRow.getCell(col).protection = { locked: false }; }
   if (type === 'purchase') sheet.dataValidations.add('I2:I5001', { type: 'list', allowBlank: true, formulae: ['"Yes,No"'], showErrorMessage: true, errorTitle: 'Choose Yes or No', error: 'Tax Inclusive must be Yes or No.' });
   await sheet.protect('F012-locked-reference-fields', { selectLockedCells: false, selectUnlockedCells: true, insertRows: true, deleteRows: true, formatColumns: true });
   if (type === 'selling') {
@@ -67,7 +67,7 @@ async function validateWorkbook(bid, uid, type, buffer) {
   const expectedSheets = type === 'selling' ? ['_meta', 'Help', 'Products', 'Price Rules'] : ['_meta', 'Help', 'Products'];
   if (wb.worksheets.some(s => !expectedSheets.includes(s.name))) throw fail(400, 'WORKBOOK_SHEETS', 'The workbook contains an unsupported sheet.');
   if (sheet.rowCount > 5001) throw fail(413, 'WORKBOOK_TOO_MANY_ROWS', 'A workbook may contain at most 5,000 product rows.');
-  const products = await Product.find({ businessId: bid }).select('_id name normalizedName type description categoryIds baseUnitId').lean(); const businessCategories = await Category.find({ businessId: bid }).select('_id name parentId').lean(); const categoryById = new Map(businessCategories.map(category => [String(category._id), category])); const categoryIdByPath = new Map(businessCategories.map(category => [categoryPath(category, categoryById).toLocaleLowerCase(), String(category._id)]));
+  const products = await Product.find({ businessId: bid }).select('_id name normalizedName type description categoryIds baseUnit units quantityVariants needsUnit variations variants').lean(); const businessCategories = await Category.find({ businessId: bid }).select('_id name parentId').lean(); const categoryById = new Map(businessCategories.map(category => [String(category._id), category])); const categoryIdByPath = new Map(businessCategories.map(category => [categoryPath(category, categoryById).toLocaleLowerCase(), String(category._id)]));
   const byId = new Map(products.map(p => [String(p._id), p])); const data = { products: [], rules: [] }; const errors = []; const keys = new Map(); const ids = new Set(); const nameKeys = new Set();
   const map = heading(sheet); const required = ['product key', 'product id', 'product name', 'product type', 'description', 'categories', 'base unit', type === 'selling' ? 'default selling price' : 'purchase cost', ...(type === 'purchase' ? ['tax inclusive', 'separate tax'] : [])];
   const productColumns = new Set(required);
@@ -87,9 +87,12 @@ async function validateWorkbook(bid, uid, type, buffer) {
       if (!productId && normalizedName) nameKeys.add(normalizedName);
       const categoryNames = column(map, row, 'categories').split(';').map(x => x.trim()).filter(Boolean); const categories = categoryNames.map(name => categoryIdByPath.get(name.toLocaleLowerCase()));
       if (categories.some(id => !id) || new Set(categories).size !== categories.length) throw fail(400, 'WORKBOOK_CATEGORY_REFERENCE', 'One or more Category names do not match a unique category path in this business.');
-      const baseUnitName = column(map, row, 'base unit'); const baseUnit = baseUnitName ? await Unit.findOne({ businessId: bid, normalizedName: baseUnitName.toLocaleLowerCase().trim() }).select('_id').lean() : null; const baseUnitId = baseUnit?._id ? String(baseUnit._id) : null;
-      if (baseUnitName && !baseUnitId) throw fail(400, 'WORKBOOK_UNIT_REFERENCE', 'Base Unit name does not match a unit in this business.');
-      const product = { rowNumber: i, key, productId: productId || null, name, type: typeValue, description: productId ? (byId.get(productId)?.description || '') : column(map, row, 'description'), categoryIds: categories, baseUnitId };
+      const baseUnitName = column(map, row, 'base unit'); const existing = byId.get(productId);
+      if (existing && baseUnitName !== (existing.baseUnit?.name || '')) throw fail(400, 'WORKBOOK_UNIT_REFERENCE', 'Base Unit must match the product base unit.');
+      const canonical = Object.entries(productUnits.metrics).find(([symbol, unit]) => symbol.toLowerCase() === baseUnitName.toLowerCase() || unit[0].toLowerCase() === baseUnitName.toLowerCase());
+      if (!existing && !canonical) throw fail(400, 'WORKBOOK_UNIT_REFERENCE', 'Use a supported canonical base unit or configure the product before importing prices.');
+      const config = existing ? productUnits.dto(existing) : productUnits.normalize({ baseUnit: { key: 'base', name: canonical[1][0], symbol: canonical[0], dimension: canonical[1][1], factorToBase: '1' } });
+      const product = { rowNumber: i, key, productId: productId || null, name, type: typeValue, description: existing?.description || column(map, row, 'description'), categoryIds: categories, ...config };
       product.version = 0;
       if (type === 'selling') product.defaultSellingPrice = decimalText(column(map, row, 'default selling price'));
       else { product.purchaseCost = decimalText(column(map, row, 'purchase cost')); const inclusive = column(map, row, 'tax inclusive').toLowerCase(); if (!inclusive || !['yes', 'no'].includes(inclusive)) throw fail(400, 'WORKBOOK_TAX_INCLUSIVE', 'Tax Inclusive must be Yes or No.'); product.taxInclusive = inclusive !== 'no'; product.separateTaxAmount = decimalText(column(map, row, 'separate tax')); product.separateTaxId = null; if (!product.taxInclusive && !product.separateTaxAmount) throw fail(400, 'SEPARATE_TAX_REQUIRED', 'Enter a separate tax amount when tax is not inclusive.'); }
@@ -171,9 +174,11 @@ async function commitWorkbook(bid, uid, operationId, digest, choices = []) {
     if (!id) { for (const rule of ruleRows) ruleResults.push({ rowNumber: rule.rowNumber, productName: row.name, customerName: rule.customerName, sellingPrice: rule.sellingPrice, ignored: true }); continue; }
     try {
       let productId = id;
-      const productFields = { name: row.name, type: row.type, categoryIds: row.categoryIds, baseUnitId: row.baseUnitId };
+      const productFields = { name: row.name, type: row.type, categoryIds: row.categoryIds, baseUnit: row.baseUnit, units: row.units, quantityVariants: row.quantityVariants };
       if (id.startsWith('new:')) { const choice = choiceMap.get(row.rowNumber); if (choice.action === 'create') { await access(bid, uid, 'business.catalog.products.manage'); const created = await catalog.createProduct(bid, uid, { ...productFields, description: row.description }); productId = created.id; } else productId = id; }
       else if (!row.productId) { await access(bid, uid, 'business.catalog.products.manage'); const choice = choiceMap.get(row.rowNumber); if (choice.action === 'update') await catalog.updateProduct(bid, uid, productId, productFields); }
+      const currentProduct = await Product.findOne({ _id: productId, businessId: bid }).lean();
+      if (!currentProduct || JSON.stringify(productUnits.dto(currentProduct).baseUnit) !== JSON.stringify(row.baseUnit)) throw fail(409, 'WORKBOOK_UNIT_REFERENCE', 'Product base units changed. Download and validate a current workbook.');
       const old = await Price.findOne({ businessId: bid, productId }).lean();
       if (session.workbookType === 'selling') {
         await pricing.saveWorkbook(bid, uid, productId, { ...(row.priceChanged ? { defaultSellingPrice: row.defaultSellingPrice || null } : {}), ruleChanges: ruleRows, version: old?.version || 0 });

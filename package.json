@@ -9,7 +9,11 @@
     "worker:dev": "node --watch worker.js",
     "dev": "node --watch index.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "seed:general-store": "node src/seeds/generalStore.js"
+    "seed:general-store": "node src/seeds/generalStore.js",
+    "test:f026": "node --test test/productUnits.test.js test/productUnitFlows.test.js test/productUnitUi.test.js",
+    "migrate:product-units": "node src/migrations/productEmbeddedUnits.js",
+    "migrate:product-catalog": "node src/migrations/productCatalogF028.js",
+    "test:f026:integration": "node test/f026.integration.js"
   },
   "author": "Saurabh Kumar",
   "license": "ISC",

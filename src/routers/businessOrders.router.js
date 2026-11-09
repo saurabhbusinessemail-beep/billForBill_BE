@@ -7,6 +7,7 @@ const image = express.raw({ type: ['image/jpeg', 'image/png', 'image/webp', 'app
 router.use(requireSession, (_req, res, next) => { res.setHeader('Cache-Control', 'private, no-store'); next(); });
 router.get('/:businessId/orders/summary', controller.summary);
 router.get('/:businessId/orders/options', controller.options);
+router.get('/:businessId/orders/products/search', controller.searchProducts);
 router.get('/:businessId/orders/contacts/lookup', controller.lookupContact);
 router.post('/:businessId/orders/taxes', controller.addTax);
 router.get('/:businessId/orders', controller.list);

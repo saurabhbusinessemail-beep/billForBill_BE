@@ -8,6 +8,8 @@ const User = require('../DB/models/User');
 const RateLimitWindow = require('../DB/models/RateLimitWindow');
 const Pricing = require('../DB/models/BusinessProductPricing');
 const { normalizePhone } = require('../utils/phone');
+const productUnits = require('./productUnits');
+const { rateModes } = require('./serviceMeasurement');
 const fail = (statusCode, code, message) => Object.assign(new Error(message), { statusCode, code });
 const decimal = (value, field, required = false) => {
   if ((value === null || value === undefined || value === '') && !required) return null;
@@ -17,14 +19,17 @@ const decimal = (value, field, required = false) => {
 };
 const value = (amount) => amount == null ? null : amount.toString();
 function present(product, pricing) {
-  const p = product.toObject ? product.toObject() : product;
+  const p = product.toObject ? product.toObject({ flattenMaps: true }) : product;
+  const baseUnit = productUnits.dto(p).baseUnit;
   const row = pricing?.toObject ? pricing.toObject() : pricing;
   const rules = (row?.rules || []).map((r) => ({ id: String(r._id), customerUserId: r.customerUserId ? String(r.customerUserId) : null, minimumQuantity: r.minimumQuantity ?? null, sellingPrice: value(r.sellingPrice), active: r.active }));
   return {
-    id: String(p._id), name: p.name, type: p.type, categoryIds: (p.categoryIds || []).map(String),
+    id: String(p._id), name: p.name, type: p.type, baseUnitName: baseUnit?.name || '', baseUnitSymbol: baseUnit?.symbol || '', categoryIds: (p.categoryIds || []).map(String),
     purchaseCost: value(row?.purchaseCost), taxInclusive: row?.taxInclusive ?? true,
     separateTaxAmount: value(row?.separateTaxAmount), separateTaxId: row?.separateTaxId ? String(row.separateTaxId) : null,
     defaultSellingPrice: value(row?.defaultSellingPrice), rules, version: row?.version || 0,
+    variations: productUnits.variations(p).map(({ key, values }) => ({ key, values })),
+    variantPrices: (row?.variantPrices || []).map(price => ({ variantKey: price.variantKey, basis: price.basis, sellingPrice: value(price.sellingPrice), purchaseCost: value(price.purchaseCost) })),
     updatedAt: row?.updatedAt || null,
   };
 }
@@ -95,6 +100,19 @@ async function save(bid, uid, pid, body) {
   if (Object.hasOwn(body, 'separateTaxId')) patch.separateTaxId = body.separateTaxId || null;
   if (Object.hasOwn(body, 'defaultSellingPrice')) patch.defaultSellingPrice = decimal(body.defaultSellingPrice, 'default selling price');
   if (Object.hasOwn(body, 'rules')) patch.rules = normalizeRules(body.rules);
+  if (Object.hasOwn(body, 'variantPrices')) {
+    const keys = new Set(productUnits.variations(product).map(variant => variant.key));
+    const seen = new Set();
+    const service = ['Services', 'Service'].includes(product.type);
+    if (!Array.isArray(body.variantPrices) || body.variantPrices.length > keys.size) throw fail(400, 'INVALID_VARIANT_PRICE', 'Choose valid variant prices.');
+    patch.variantPrices = body.variantPrices.map(price => {
+      if (!price || !keys.has(price.variantKey) || seen.has(price.variantKey) || !rateModes.includes(price.basis) || (!service && price.basis !== 'fixed')) {
+        throw fail(400, 'INVALID_VARIANT_PRICE', 'Choose a valid variant and rate basis.');
+      }
+      seen.add(price.variantKey);
+      return { variantKey: price.variantKey, basis: price.basis, sellingPrice: decimal(price.sellingPrice, 'variant selling price'), purchaseCost: decimal(price.purchaseCost, 'variant purchase cost') };
+    });
+  }
   const nextTaxInclusive = patch.taxInclusive ?? (await Pricing.findOne({ businessId: bid, productId: pid }).select('taxInclusive').lean())?.taxInclusive ?? true;
   if (!nextTaxInclusive && patch.separateTaxAmount === undefined && patch.separateTaxId === undefined) {
     const old = await Pricing.findOne({ businessId: bid, productId: pid }).select('separateTaxAmount separateTaxId').lean();

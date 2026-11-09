@@ -21,19 +21,25 @@ async function authorization(businessId, userId) { const value = await access(bu
 async function list(bid, uid, kind, query) { await authorize(bid, uid, kind); return common.list(kind, query, bid); }
 async function get(bid, uid, kind, id) { await authorize(bid, uid, kind); return common.get(kind, id, bid); }
 async function create(bid, uid, kind, body) { await authorize(bid, uid, kind, true); return common.create(kind, body, bid); }
-function rejectImageMutation(body, hasImageBytes = false) {
+function rejectImageReferences(body) {
   const imageFields = ['image', 'imageId', 'imageData', 'imageBytes', 'imageRef', 'imageUrl', 'productImage', 'removeImage', 'hasImage'];
-  if (hasImageBytes || imageFields.some((field) => Object.hasOwn(body || {}, field))) {
-    throw common.error(403, 'BUSINESS_PRODUCT_IMAGE_IMMUTABLE', 'Product images cannot be changed from a business catalog.');
+  if (imageFields.some((field) => Object.hasOwn(body || {}, field))) {
+    throw common.error(400, 'INVALID_PRODUCT_IMAGE', 'Upload image bytes to change a product image.');
   }
 }
-async function createProduct(bid, uid, body, type, name, bytes) { await authorize(bid, uid, 'products', true); rejectImageMutation(body, Boolean(type || name || (Buffer.isBuffer(bytes) && bytes.length))); return common.create('products', body, bid); }
+async function createProduct(bid, uid, body, type, name, bytes) {
+  await authorize(bid, uid, 'products', true);
+  rejectImageReferences(body);
+  return type === undefined ? common.create('products', body, bid) : products.createWithImage(body, type, name, bytes, bid);
+}
 async function update(bid, uid, kind, id, body) { await authorize(bid, uid, kind, true); return common.update(kind, id, body, bid); }
 async function updateProduct(bid, uid, id, body, type, name, bytes) {
   await authorize(bid, uid, 'products', true);
-  rejectImageMutation(body, Boolean(type || name || (Buffer.isBuffer(bytes) && bytes.length)));
-  if (!await Product.exists({ _id: id, businessId: bid })) throw common.error(404, 'CATALOG_ITEM_NOT_FOUND', 'Catalog item not found.');
-  return type ? products.updateWithImage(id, body, type, name, bytes, bid) : products.updateDetails(id, body, bid);
+  rejectImageReferences(body);
+  if (type === undefined) return products.updateDetails(id, body, bid);
+  const product = await common.get('products', id, bid);
+  if (!product.canEditImage) throw common.error(403, 'BUSINESS_PRODUCT_IMAGE_IMMUTABLE', 'Images on copied products are managed in Admin Setup.');
+  return products.updateWithImage(id, body, type, name, bytes, bid);
 }
 async function remove(bid, uid, kind, id) {
   await authorize(bid, uid, kind, true);
@@ -50,4 +56,4 @@ async function counts(bid, uid) {
   const entries = await Promise.all(Object.entries(models).map(async ([kind, Model]) => [kind, await Model.countDocuments({ businessId: bid })]));
   return Object.fromEntries(entries);
 }
-module.exports = { authorize, authorization, list, get, create, createProduct, update, updateProduct, remove, impact, counts, rejectImageMutation };
+module.exports = { authorize, authorization, list, get, create, createProduct, update, updateProduct, remove, impact, counts };

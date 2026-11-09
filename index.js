@@ -21,6 +21,7 @@ const businessOrdersRouter = require('./src/routers/businessOrders.router');
 const businessInventoryRouter = require('./src/routers/businessInventory.router');
 const businessLeadsRouter = require('./src/routers/businessLeads.router');
 const businessBillsPaymentsRouter = require('./src/routers/businessBillsPayments.router');
+const businessOpeningBalancesRouter = require('./src/routers/businessOpeningBalances.router');
 const businessDeliveriesRouter = require('./src/routers/businessDeliveries.router');
 const personalRouter = require('./src/routers/personal.router');
 const adminSetupRouter = require('./src/routers/adminSetup.router');
@@ -116,12 +117,14 @@ app.use('/businesses', businessPricingRouter);
 app.use('/businesses', businessOrdersRouter);
 app.use('/businesses', businessInventoryRouter);
 app.use('/businesses', businessLeadsRouter);
+app.use('/businesses', businessOpeningBalancesRouter);
 app.use('/businesses', businessBillsPaymentsRouter);
 app.use('/businesses', businessPlansRouter);
 app.use('/businesses', businessDeliveriesRouter);
 app.use('/personal', personalRouter);
 app.use('/admin-setup/plans-offers', plansOffersRouter);
 app.use('/admin-setup', adminSetupRouter);
+app.use('/maintenance', require('./src/routers/dataCleanup.router'));
 app.use('/product-images', productImagesRouter);
 
 app.use((err, _req, res, _next) => {

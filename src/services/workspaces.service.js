@@ -5,6 +5,7 @@ const Business = require('../DB/models/Business');
 const BusinessMembership = require('../DB/models/BusinessMembership');
 const BusinessLogo = require('../DB/models/BusinessLogo');
 const User = require('../DB/models/User');
+const { businessCurrency } = require('./businessCurrency');
 
 function createError(statusCode, code, message) {
   const error = new Error(message);
@@ -18,8 +19,10 @@ function toWorkspace(business, logoIds) {
     id: String(business._id),
     kind: 'business',
     legalName: business.legalName,
+    currencyCode: businessCurrency(business),
     businessTypeId: business.businessTypeId ? String(business.businessTypeId) : null,
     registrationId: business.registrationId,
+    gstin: business.gstin || '',
     phone: business.phone,
     email: business.email,
     website: business.website,
@@ -74,6 +77,7 @@ async function getWorkingAtWorkspaces(userId) {
         id,
         kind: 'business',
         legalName: business.legalName,
+        currencyCode: businessCurrency(business),
         businessTypeId: business.businessTypeId ? String(business.businessTypeId) : null,
         hasLogo: logoIds.has(id),
       }];
